@@ -1,0 +1,47 @@
+# Bu dosyayı "ayarlar.toml" adıyla kopyalayıp kendi ortamınıza göre düzenleyin.
+
+[teamcenter]
+url = "http://tcserver:7001/tc"     # Web tier adresi (Active Workspace / 4-tier)
+kullanici = ""                      # boşsa TC_USER ortam değişkeni veya sorulur (şifre: TC_PASSWORD veya sorulur)
+grup = ""
+rol = ""
+ssl_dogrula = true
+zaman_asimi_sn = 600
+varsayilan_item_id = ""             # doluysa sadece "A" yazmanız yeterli
+hedef = "son"                       # "son" = en son revizyon, "yayinlanmis" = en son released revizyon
+
+# Boş = kullanıcının varsayılan revizyon kuralı.
+# Eski revizyonun 5 yıl önceki halini görmek için alt parçaların da o zamanki
+# revizyonları gelmeli: "Precise" yapı kullanıyorsanız sorun yok; değilse
+# eski BOM için tarihli bir kural seçip --eski-tarih YYYY-AA-GG verin.
+revizyon_kurali = ""                # ör. "Latest Working"
+eski_revizyon_kurali = ""           # boşsa revizyon_kurali kullanılır
+
+[ozellikler]
+# BOM satırı (BOMLine) özellik adları. Structure Manager'da sütun seçerken
+# görünen iç adlar. Ağırlık özelliğini bulmak için:
+#   python -m tc_rev_compare 123456/A --ozellik-test bl_rev_weight bl_rev_mass ...
+item_id        = "bl_item_item_id"
+revizyon       = "bl_rev_item_revision_id"
+isim           = "bl_rev_object_name"
+find_no        = "bl_sequence_no"
+paket_adedi    = "bl_pack_count"
+lokal_donusum  = "bl_plmxml_occ_xform"   # ebeveyne göre konum (PLMXML 4x4, metre)
+mutlak_donusum = "bl_plmxml_abs_xform"   # montaja göre konum
+agirlik        = ["bl_rev_weight", "bl_rev_mass"]   # ilk dolu olan kullanılır
+
+[birimler]
+agirlik_carpani = 1.0       # özellik değeri × çarpan = kg (gram ise 0.001)
+konum_carpani   = 1000.0    # dönüşüm değeri × çarpan = mm (PLMXML metre verir)
+
+[toleranslar]
+agirlik_kg    = 0.001       # bu kadar ve altı ağırlık farkı yok sayılır
+agirlik_yuzde = 0.0         # >0 ise yüzde farkı da bu değerin altındaysa yok sayılır
+konum_mm      = 0.1
+aci_derece    = 0.01
+degistirme_mm = 1.0         # farklı Item ID aynı konumdaysa "değiştirildi" sayılır
+
+# --dosya modu: CSV/XLSX sütun başlıkları (büyük/küçük harf duyarsız).
+# Varsayılanlar: Seviye, Item ID, Revizyon, İsim, Find No, Ağırlık, Adet, X, Y, Z, Dönüşüm
+# [dosya_sutunlari]
+# agirlik = ["Mass (kg)"]
