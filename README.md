@@ -1,3 +1,41 @@
+# Ağırlık BOM karşılaştırma (Excel macro çıktısı) — `bom_agirlik_fark.py`
+
+Aynı formattaki iki ağırlık BOM Excel dosyasını karşılaştırır; tek dosyalık,
+sadece `openpyxl` gerektirir.
+
+```
+pip install openpyxl
+python bom_agirlik_fark.py eski.xlsx yeni.xlsx            # rapor: agirlik_fark_eski_yeni.xlsx
+python bom_agirlik_fark.py                                 # dosyaları sorar (sürükle-bırak)
+python bom_agirlik_fark.py ornekler/agirlik_eski.xlsx ornekler/agirlik_yeni.xlsx
+```
+
+Ekrana toplam / parça / fastener ağırlık farkını ve en çok etki eden parçaları
+yazar; Excel raporunda:
+
+- **Özet:** eski-yeni ağırlık, fastener, toplam ve farkları; durum sayıları
+- **Farklar:** değişen / eklenen / silinen parçalar, toplam farka göre sıralı
+  (adet, ağırlık, fastener, toplam: eski · yeni · fark · fark %)
+- **Bilgi Değişiklikleri:** ağırlığı aynı ama isim/revizyon vb. değişenler
+- **Tüm Parçalar:** hepsi; filtre açık
+
+Notlar:
+- Başlık satırı ve sayfa otomatik bulunur (üstte başlık/logo satırları olabilir).
+  Sütunlar TR/EN başlıklardan tanınır; tanınmazsa
+  `--parca "Part No" --agirlik "Weight" --fastener "Fastener Wt" --toplam "Total"`
+  ile verin. `--sayfa` ile sayfa seçilebilir.
+- Eşleştirme parça numarasıyla yapılır; aynı parça birden çok satırdaysa
+  değerleri toplanır. Farklı anahtar için `--anahtar "Parent" "Part No"`.
+- Toplam sütunu yoksa toplam = ağırlık + fastener. Ağırlıklar birim ağırlıksa
+  `--adet-carp`.
+- BOM toplamı: seviye sütunu varsa en alt seviye satırların toplamı (montaj
+  satırları çift sayılmasın diye), yoksa tüm satırlar; `--toplam-yontemi
+  hepsi|yaprak|kok` ile değiştirilebilir. "TOPLAM" satırları ve parça no'su boş
+  satırlar atlanır.
+- `--tolerans 0.001` (kg) altındaki farklar yok sayılır.
+
+---
+
 # Teamcenter Revizyon Karşılaştırma (ağırlık · konum · isimlendirme)
 
 Eski bir revizyon numarasını girersiniz; araç Teamcenter'dan o revizyonun ve

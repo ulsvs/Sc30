@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 ayarlar.toml
 karsilastirma_*.xlsx
+agirlik_fark_*.xlsx
