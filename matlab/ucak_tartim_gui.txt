@@ -1,0 +1,488 @@
+function ucak_tartim_gui()
+% =========================================================================
+%  UCAK_TARTIM_GUI  -  Tek açılı (eğik düzlem) uçak tartımı arayüzü
+% -------------------------------------------------------------------------
+%  Kullanım : Bu dosyayı "ucak_tartim_gui.m" olarak kaydedip MATLAB'de
+%             >> ucak_tartim_gui      komutuyla çalıştırın.
+%  Gereken  : MATLAB R2018b veya üzeri (uifigure / uigridlayout)
+%
+%  Akış:
+%   1) İstasyon seçilir (C-D veya A-B). Seçilen istasyonun sabit değerleri
+%      (jack noktaları, referans noktaları) otomatik olarak hesaba girer.
+%   2) Kullanıcı arka jack iniş mesafesini (Δz) ve jack okumalarını
+%      (sol, sağ, arka) girer, "Tartımı Ekle ve Hesapla"ya basar.
+%   3) Her tartım tabloya eklenir (iteratif). Her yeni tartım bir önceki
+%      tartımla karşılaştırılır; arka jack daha aşağıdaysa ve arka jack
+%      daha hafifse sonuç "GÜVENİLMEZ" olarak işaretlenir.
+%   4) Optimal arka jack iniş mesafesi ayrıca hesaplanabilir.
+%
+%  Birimler : uzunluk [mm], ağırlık [kg], açı [derece] (içeride radyan)
+%  Eksenler : x -> uçağın arkasına doğru pozitif, z -> yukarı pozitif
+%
+%  >>> KENDİ DENKLEMLERİNİZİ dosyanın en altındaki
+%      "DENKLEMLER BÖLÜMÜ" içine girin (DENKLEM-1 ... DENKLEM-7). <<<
+%  >>> İstasyon değerlerini "istasyonVerileri" fonksiyonuna girin.      <<<
+% =========================================================================
+
+ST   = istasyonVerileri();
+TART = bosTartimListesi();
+
+% ---------------------------- ARAYÜZ ------------------------------------
+fig = uifigure('Name','Uçak Tartımı - Tek Açılı Yöntem', ...
+               'Position',[80 60 1300 760]);
+gl  = uigridlayout(fig,[2 2]);
+gl.ColumnWidth = {400,'1x'};
+gl.RowHeight   = {'1x',260};
+
+% --- Sol panel: girdiler ---
+pnl = uipanel(gl,'Title','Girdiler');
+pnl.Layout.Row = 1; pnl.Layout.Column = 1;
+g = uigridlayout(pnl,[15 2]);
+g.ColumnWidth = {'1.4x','1x'};
+g.RowHeight   = {24,70,22,24,24,24,24,30,30,22,24,24,24,30,30};
+g.RowSpacing  = 6;
+
+etiket(g,1,1,'İstasyon:');
+ddIst = uidropdown(g,'Items',{ST.ad},'ValueChangedFcn',@istasyonDegisti);
+yerlestir(ddIst,1,2);
+
+lblIst = uilabel(g,'Text','','WordWrap','on','FontSize',11, ...
+                 'VerticalAlignment','top');
+yerlestir(lblIst,2,[1 2]);
+
+baslik(g,3,'Tartım Girdileri');
+etiket(g,4,1,'Arka jack iniş mesafesi Δz [mm]:');
+edDz  = uieditfield(g,'numeric','Value',0,'Limits',[0 Inf]);   yerlestir(edDz,4,2);
+etiket(g,5,1,'Sol jack okuması [kg]:');
+edSol = uieditfield(g,'numeric','Value',0,'Limits',[0 Inf]);   yerlestir(edSol,5,2);
+etiket(g,6,1,'Sağ jack okuması [kg]:');
+edSag = uieditfield(g,'numeric','Value',0,'Limits',[0 Inf]);   yerlestir(edSag,6,2);
+etiket(g,7,1,'Arka jack okuması [kg]:');
+edArk = uieditfield(g,'numeric','Value',0,'Limits',[0 Inf]);   yerlestir(edArk,7,2);
+
+btnEkle = uibutton(g,'Text','Tartımı Ekle ve Hesapla', ...
+          'FontWeight','bold','ButtonPushedFcn',@tartimEkle);
+yerlestir(btnEkle,8,[1 2]);
+btnSil  = uibutton(g,'Text','Son Tartımı Sil','ButtonPushedFcn',@sonTartimiSil);
+yerlestir(btnSil,9,1);
+btnSif  = uibutton(g,'Text','Tümünü Sıfırla','ButtonPushedFcn',@sifirla);
+yerlestir(btnSif,9,2);
+
+baslik(g,10,'Optimal Arka Jack İniş Mesafesi');
+etiket(g,11,1,'Yük hücresi hassasiyeti ± [kg]:');
+edSigW = uieditfield(g,'numeric','Value',2,'Limits',[0 Inf]);  yerlestir(edSigW,11,2);
+etiket(g,12,1,'Hedef CGz hassasiyeti ± [mm]:');
+edSigZ = uieditfield(g,'numeric','Value',10,'Limits',[0 Inf]); yerlestir(edSigZ,12,2);
+etiket(g,13,1,'İzin verilen maks. eğim açısı [°]:');
+edTmax = uieditfield(g,'numeric','Value',3,'Limits',[0 45]);   yerlestir(edTmax,13,2);
+
+btnOpt = uibutton(g,'Text','Optimal Δz Hesapla','ButtonPushedFcn',@optimalHesapla);
+yerlestir(btnOpt,14,[1 2]);
+btnXls = uibutton(g,'Text','Tabloyu Excel''e Aktar','ButtonPushedFcn',@disariAktar);
+yerlestir(btnXls,15,[1 2]);
+
+% --- Sağ üst: sonuç alanı ---
+pnlS = uipanel(gl,'Title','Sonuçlar / Yorum');
+pnlS.Layout.Row = 1; pnlS.Layout.Column = 2;
+gs = uigridlayout(pnlS,[1 1]);
+txtSonuc = uitextarea(gs,'Editable','off','FontName','Consolas','FontSize',12);
+
+% --- Alt: tartım geçmişi tablosu ---
+kolonlar = {'No','İstasyon','Δz [mm]','Sol [kg]','Sağ [kg]','Arka [kg]', ...
+            'Toplam [kg]','θ [°]','Yeni CGx','Yeni AftJack x','Yeni AftJack z', ...
+            'Yeni P1 x','Yeni P1 z','Yeni P2 x','Yeni P2 z','Durum'};
+tbl = uitable(gl,'ColumnName',kolonlar,'RowName',{}, ...
+              'Data',cell(0,numel(kolonlar)));
+tbl.Layout.Row = 2; tbl.Layout.Column = [1 2];
+
+istasyonDegisti();
+yazSonuc({'Hazır. İstasyon seçip ilk tartımı (tercihen Δz = 0, düz tartım) girin.'});
+
+% =========================================================================
+%                        İÇ (NESTED) FONKSİYONLAR
+% =========================================================================
+    function k = aktifIstasyon()
+        k = find(strcmp({ST.ad}, ddIst.Value), 1);
+    end
+
+    function istasyonDegisti(~,~)
+        s = ST(aktifIstasyon());
+        L = s.xAft - s.xMain;
+        lblIst.Text = sprintf([ ...
+            'Ana jack (sağ/sol) : x = %.1f , z = %.1f mm\n' ...
+            'Arka jack          : x = %.1f , z = %.1f mm   (L = %.1f mm)\n' ...
+            'Nokta %s          : x = %.1f , z = %.1f mm\n' ...
+            'Nokta %s          : x = %.1f , z = %.1f mm'], ...
+            s.xMain, s.zMain, s.xAft, s.zAft, L, ...
+            s.p1ad, s.x1, s.z1, s.p2ad, s.x2, s.z2);
+        tbl.ColumnName{12} = ['Yeni ' s.p1ad ' x'];
+        tbl.ColumnName{13} = ['Yeni ' s.p1ad ' z'];
+        tbl.ColumnName{14} = ['Yeni ' s.p2ad ' x'];
+        tbl.ColumnName{15} = ['Yeni ' s.p2ad ' z'];
+    end
+
+    % ---------------------------------------------------------------------
+    function tartimEkle(~,~)
+        s   = ST(aktifIstasyon());
+        dz  = edDz.Value;
+        Wl  = edSol.Value;
+        Wr  = edSag.Value;
+        Wa  = edArk.Value;
+        W   = Wl + Wr + Wa;
+        L   = s.xAft - s.xMain;
+
+        if W <= 0
+            uialert(fig,'Toplam ağırlık sıfır olamaz. Jack okumalarını girin.','Hata');
+            return
+        end
+        if dz >= abs(L)
+            uialert(fig,'Δz, ana jack - arka jack mesafesinden (L) büyük olamaz.','Hata');
+            return
+        end
+
+        % ---------------- DENKLEMLER (aşağıda tanımlı) -------------------
+        theta          = denk_aci(dz, L);                         % DENKLEM-1
+        [aftX, aftZ]   = denk_aftJack(s, theta, dz);              % DENKLEM-2
+        CGx            = denk_CGx_yeni(Wl, Wr, Wa, s, aftX);      % DENKLEM-3
+        [p1x, p1z]     = denk_nokta(s.x1, s.z1, s, theta);        % DENKLEM-4
+        [p2x, p2z]     = denk_nokta(s.x2, s.z2, s, theta);        % DENKLEM-4
+        % -----------------------------------------------------------------
+
+        yeni = struct('istasyon',s.ad,'dz',dz,'Wsol',Wl,'Wsag',Wr, ...
+                      'Warka',Wa,'W',W,'theta',theta,'CGx',CGx, ...
+                      'aftX',aftX,'aftZ',aftZ,'p1x',p1x,'p1z',p1z, ...
+                      'p2x',p2x,'p2z',p2z,'guvenilir',true,'notlar',{{}});
+
+        % ---------------- GÜVENİLİRLİK KONTROLÜ --------------------------
+        onceki = find(strcmp({TART.istasyon}, s.ad), 1, 'last');
+        if ~isempty(onceki)
+            [ok, notlar] = guvenilirlikKontrol(TART(onceki), yeni); % DENKLEM-5
+            yeni.guvenilir = ok;
+            yeni.notlar    = notlar;
+        else
+            yeni.notlar = {'Bu istasyon için ilk tartım (karşılaştırma yapılmadı).'};
+        end
+
+        TART(end+1) = yeni;
+        tabloyuGuncelle();
+        sonucGoster(numel(TART));
+    end
+
+    % ---------------------------------------------------------------------
+    function sonucGoster(i)
+        t = TART(i);
+        s = ST(strcmp({ST.ad}, t.istasyon));
+
+        % Gövde eksenindeki CG (x,z): bu istasyondaki tüm GÜVENİLİR
+        % tartımlar kullanılarak en küçük kareler ile çözülür.
+        sec = find(strcmp({TART.istasyon}, t.istasyon) & [TART.guvenilir]);
+        [CGxG, CGzG, cgNot] = denk_CG_govde(TART(sec), s);          % DENKLEM-6
+
+        if t.guvenilir, durum = 'GÜVENİLİR'; else, durum = '*** GÜVENİLMEZ ***'; end
+
+        sat = {
+            sprintf('=== TARTIM %d  |  İstasyon %s  |  %s ===', i, t.istasyon, durum)
+            ''
+            sprintf('Arka jack iniş Δz      : %10.2f mm', t.dz)
+            sprintf('Eğim açısı θ           : %10.4f °', rad2deg(t.theta))
+            sprintf('Sol / Sağ / Arka       : %.2f / %.2f / %.2f kg', t.Wsol, t.Wsag, t.Warka)
+            sprintf('Toplam ağırlık         : %10.2f kg', t.W)
+            ''
+            '--- ÇIKTILAR ---'
+            sprintf('Yeni CGx               : %10.2f mm', t.CGx)
+            sprintf('Yeni aft jack x        : %10.2f mm', t.aftX)
+            sprintf('Yeni aft jack z        : %10.2f mm', t.aftZ)
+            sprintf('Yeni point %s_x         : %10.2f mm', lower(s.p1ad), t.p1x)
+            sprintf('Yeni point %s_z         : %10.2f mm', lower(s.p1ad), t.p1z)
+            sprintf('Yeni point %s_x         : %10.2f mm', lower(s.p2ad), t.p2x)
+            sprintf('Yeni point %s_z         : %10.2f mm', lower(s.p2ad), t.p2z)
+            ''
+            '--- GÖVDE EKSENİNDE CG (iteratif, güvenilir tartımlardan) ---'
+            sprintf('CGx (gövde)            : %10.2f mm', CGxG)
+            sprintf('CGz (gövde)            : %10.2f mm', CGzG)
+            ['Not: ' cgNot]
+            ''
+            '--- YORUM ---'
+            };
+        sat = [sat; t.notlar(:)];
+        yazSonuc(sat);
+    end
+
+    % ---------------------------------------------------------------------
+    function optimalHesapla(~,~)
+        s = ST(aktifIstasyon());
+        L = s.xAft - s.xMain;
+
+        W = edSol.Value + edSag.Value + edArk.Value;
+        if W <= 0 && ~isempty(TART), W = TART(end).W; end
+        if W <= 0
+            uialert(fig,['Optimal Δz için toplam ağırlık gerekli. Jack okumalarını ' ...
+                         'girin veya önce bir tartım ekleyin.'],'Bilgi');
+            return
+        end
+
+        [dzOpt, sigZ, sinirlandi] = denk_optimalDz(L, W, edSigW.Value, ...
+                                     edSigZ.Value, deg2rad(edTmax.Value)); % DENKLEM-7
+        sat = {
+            sprintf('=== OPTİMAL ARKA JACK İNİŞ MESAFESİ  |  İstasyon %s ===', s.ad)
+            sprintf('L (ana jack - arka jack) : %10.1f mm', L)
+            sprintf('Toplam ağırlık           : %10.1f kg', W)
+            ''
+            sprintf('Önerilen Δz              : %10.1f mm', dzOpt)
+            sprintf('Karşılık gelen açı θ     : %10.3f °', rad2deg(asin(dzOpt/L)))
+            sprintf('Beklenen CGz hassasiyeti : ±%9.1f mm', sigZ)
+            };
+        if sinirlandi
+            sat{end+1} = ['UYARI: Hedef hassasiyet için gereken açı izin verilen maks. ' ...
+                          'açıyı aşıyor; Δz maks. açıya göre sınırlandı.'];
+        end
+        sat{end+1} = '';
+        sat{end+1} = 'Δz [mm]  ->  beklenen ±σ(CGz) [mm]';
+        for f = [0.25 0.5 0.75 1 1.25]
+            dzi = f*dzOpt;
+            [~, si] = denk_optimalDz(L, W, edSigW.Value, 0, asin(min(dzi/L,1))); % hedef=0 -> verilen açıda σ
+            sat{end+1} = sprintf('%8.1f  ->  %8.1f', dzi, si); %#ok<AGROW>
+        end
+        yazSonuc(sat);
+    end
+
+    % ---------------------------------------------------------------------
+    function sonTartimiSil(~,~)
+        if isempty(TART), return; end
+        TART(end) = [];
+        tabloyuGuncelle();
+        if isempty(TART)
+            yazSonuc({'Tüm tartımlar silindi.'});
+        else
+            sonucGoster(numel(TART));
+        end
+    end
+
+    function sifirla(~,~)
+        sec = uiconfirm(fig,'Tüm tartımlar silinsin mi?','Sıfırla', ...
+                        'Options',{'Evet','Hayır'},'DefaultOption',2);
+        if strcmp(sec,'Evet')
+            TART = bosTartimListesi();
+            tabloyuGuncelle();
+            yazSonuc({'Sıfırlandı.'});
+        end
+    end
+
+    function tabloyuGuncelle()
+        n = numel(TART);
+        D = cell(n,16);
+        for k = 1:n
+            t = TART(k);
+            if t.guvenilir, d = 'Güvenilir'; else, d = 'GÜVENİLMEZ'; end
+            D(k,:) = {k, t.istasyon, t.dz, t.Wsol, t.Wsag, t.Warka, t.W, ...
+                      round(rad2deg(t.theta),4), round(t.CGx,2), ...
+                      round(t.aftX,2), round(t.aftZ,2), round(t.p1x,2), ...
+                      round(t.p1z,2), round(t.p2x,2), round(t.p2z,2), d};
+        end
+        tbl.Data = D;
+        % güvenilmez satırları kırmızı göster
+        if exist('uistyle','file') == 2 && n > 0
+            removeStyle(tbl);
+            kotu = find(~[TART.guvenilir]);
+            if ~isempty(kotu)
+                addStyle(tbl, uistyle('BackgroundColor',[1 0.8 0.8]), 'row', kotu);
+            end
+        end
+    end
+
+    function disariAktar(~,~)
+        if isempty(TART)
+            uialert(fig,'Aktarılacak tartım yok.','Bilgi'); return
+        end
+        [f,p] = uiputfile('*.xlsx','Kaydet','tartim_sonuclari.xlsx');
+        if isequal(f,0), return; end
+        T = cell2table(tbl.Data, 'VariableNames', ...
+            matlab.lang.makeValidName(tbl.ColumnName));
+        writetable(T, fullfile(p,f));
+        uialert(fig,['Kaydedildi: ' fullfile(p,f)],'Tamam','Icon','success');
+    end
+
+    function yazSonuc(satirlar)
+        txtSonuc.Value = satirlar;
+    end
+end   % ===================== ana fonksiyon sonu ============================
+
+
+% =========================================================================
+%                 İSTASYON VERİLERİ  (KENDİ DEĞERLERİNİZİ GİRİN)
+% -------------------------------------------------------------------------
+%  xMain, zMain : sağ/sol (ana) jack noktalarının x ve z koordinatı
+%  xAft , zAft  : arka jack noktasının düz (Δz = 0) konumdaki x ve z'si
+%  p1 / p2      : çıktıda istenen referans noktaları (C-D veya A-B)
+%  !!! Aşağıdaki sayılar ÖRNEKTİR, gerçek değerlerle değiştirin. !!!
+% =========================================================================
+function ST = istasyonVerileri()
+    % ---------------- İstasyon C-D ----------------
+    ST(1).ad    = 'C-D';
+    ST(1).p1ad  = 'C';     ST(1).p2ad = 'D';
+    ST(1).xMain = 10000;   ST(1).zMain = 1500;    % <-- GİRİN
+    ST(1).xAft  = 22000;   ST(1).zAft  = 1800;    % <-- GİRİN
+    ST(1).x1    = 9000;    ST(1).z1    = 1600;    % C noktası  <-- GİRİN
+    ST(1).x2    = 21000;   ST(1).z2    = 1700;    % D noktası  <-- GİRİN
+
+    % ---------------- İstasyon A-B ----------------
+    ST(2).ad    = 'A-B';
+    ST(2).p1ad  = 'A';     ST(2).p2ad = 'B';
+    ST(2).xMain = 11000;   ST(2).zMain = 1450;    % <-- GİRİN
+    ST(2).xAft  = 23500;   ST(2).zAft  = 1850;    % <-- GİRİN
+    ST(2).x1    = 8000;    ST(2).z1    = 1550;    % A noktası  <-- GİRİN
+    ST(2).x2    = 20000;   ST(2).z2    = 1650;    % B noktası  <-- GİRİN
+end
+
+
+% =========================================================================
+% =========================================================================
+%                          DENKLEMLER BÖLÜMÜ
+%   Her fonksiyonun içinde ">>> DENKLEMİ BURAYA GİRİN <<<" yazan satırları
+%   kendi denkleminizle değiştirin. Girdi/çıktı isimlerini değiştirmeyin.
+%   Aşağıda varsayılan olarak standart rijit-cisim dönüşüm denklemleri
+%   yazılıdır (pivot = ana jack hattı), kod bu haliyle de çalışır.
+% =========================================================================
+% =========================================================================
+
+% ------------------------- DENKLEM-1 : Eğim açısı ------------------------
+%  Girdi : dz [mm] arka jack iniş mesafesi,  L [mm] ana-arka jack mesafesi
+%  Çıktı : theta [rad]
+function theta = denk_aci(dz, L)
+    theta = asin(dz / L);                    % >>> DENKLEMİ BURAYA GİRİN <<<
+end
+
+% --------------- DENKLEM-2 : Yeni aft jack x ve z konumu -----------------
+%  Çıktı : aftX, aftZ [mm]  (eğik konumda arka jack noktası)
+function [aftX, aftZ] = denk_aftJack(s, theta, dz) %#ok<INUSD>
+    L    = s.xAft - s.xMain;
+    aftX = s.xMain + L*cos(theta) + (s.zAft - s.zMain)*sin(theta); % >>> DENKLEMİ BURAYA GİRİN <<<
+    aftZ = s.zMain - L*sin(theta) + (s.zAft - s.zMain)*cos(theta); % >>> DENKLEMİ BURAYA GİRİN <<<
+    % Not: (zAft - zMain) = 0 ise aftZ = zAft - dz olur.
+end
+
+% ----------------------- DENKLEM-3 : Yeni CGx ----------------------------
+%  Ana jack hattına göre moment dengesi (eğik konumda, yatay kollar)
+%  Çıktı : CGx [mm]
+function CGx = denk_CGx_yeni(Wl, Wr, Wa, s, aftX)
+    W   = Wl + Wr + Wa;
+    CGx = s.xMain + Wa * (aftX - s.xMain) / W;   % >>> DENKLEMİ BURAYA GİRİN <<<
+end
+
+% ------------- DENKLEM-4 : Yeni point (C/D veya A/B) x ve z --------------
+%  Seçili istasyonun p1 ve p2 noktası için ayrı ayrı çağrılır.
+%  Çıktı : xn, zn [mm]
+function [xn, zn] = denk_nokta(x, z, s, theta)
+    dx = x - s.xMain;
+    dzp = z - s.zMain;
+    xn = s.xMain + dx*cos(theta) + dzp*sin(theta);   % >>> DENKLEMİ BURAYA GİRİN <<<
+    zn = s.zMain - dx*sin(theta) + dzp*cos(theta);   % >>> DENKLEMİ BURAYA GİRİN <<<
+end
+
+% ------------------ DENKLEM-5 : Güvenilirlik kontrolü --------------------
+%  Kural: Arka jack z ekseninde önceki tartımdan DAHA AŞAĞIDA ve arka jack
+%  okuması DAHA HAFİF ise tartım GÜVENİLMEZ.
+%  (CG, jack noktalarının üzerinde olduğunda arka indikçe arka jack yükü
+%   artmalıdır; tersi ölçüm hatası işaretidir.)
+function [ok, notlar] = guvenilirlikKontrol(onc, yeni)
+    tolDz = 0.5;       % [mm]  Δz için ölçüm toleransı      <-- ayarlayın
+    tolW  = 0.0;       % [kg]  arka jack yükü toleransı      <-- ayarlayın
+    tolTop = 0.005;    % [-]   toplam ağırlık değişimi (%0.5) <-- ayarlayın
+    ok = true;
+    notlar = {};
+
+    dahaAsagida = yeni.dz    > onc.dz    + tolDz;
+    dahaHafif   = yeni.Warka < onc.Warka - tolW;
+    if dahaAsagida && dahaHafif
+        ok = false;
+        notlar{end+1} = sprintf(['TARTIM SONUCU GÜVENİLMEZ: Arka jack önceki tartıma göre ' ...
+            'daha aşağıda (Δz %.1f -> %.1f mm) fakat arka jack daha hafif ' ...
+            '(%.2f -> %.2f kg).'], onc.dz, yeni.dz, onc.Warka, yeni.Warka);
+    end
+
+    % Ayna durum (arka jack yukarı alınmış ve daha ağır) - istemezseniz silin
+    dahaYukarida = yeni.dz    < onc.dz    - tolDz;
+    dahaAgir     = yeni.Warka > onc.Warka + tolW;
+    if dahaYukarida && dahaAgir
+        ok = false;
+        notlar{end+1} = sprintf(['TARTIM SONUCU GÜVENİLMEZ: Arka jack önceki tartıma göre ' ...
+            'daha yukarıda (Δz %.1f -> %.1f mm) fakat arka jack daha ağır ' ...
+            '(%.2f -> %.2f kg).'], onc.dz, yeni.dz, onc.Warka, yeni.Warka);
+    end
+
+    % Toplam ağırlık tutarlılığı (uyarı, güvenilirliği tek başına bozmaz)
+    if abs(yeni.W - onc.W) / onc.W > tolTop
+        notlar{end+1} = sprintf(['UYARI: Toplam ağırlık önceki tartımdan %%%.2f farklı ' ...
+            '(%.1f -> %.1f kg). Jack/yük hücresi kontrol edilmeli.'], ...
+            100*abs(yeni.W-onc.W)/onc.W, onc.W, yeni.W);
+    end
+
+    if ok && isempty(notlar)
+        notlar{end+1} = 'Tartım önceki tartımla tutarlı.';
+    elseif ok
+        notlar{end+1} = 'Arka jack yük/konum değişimi tutarlı.';
+    end
+end
+
+% ------------- DENKLEM-6 : Gövde ekseninde CGx ve CGz (iteratif) ---------
+%  Her tartım i için yatay kol:  kol_i = Wa_i*(aftX_i - xMain)/W_i
+%  Rijit cisim:                  kol_i = xb*cos(θ_i) + zb*sin(θ_i)
+%  Tüm güvenilir tartımlar birlikte en küçük kareler ile çözülür.
+%  (Düz tartım + 1 eğik tartım = klasik iki tartım çözümü.)
+function [CGx, CGz, msg] = denk_CG_govde(T, s)
+    CGx = NaN; CGz = NaN;
+    if isempty(T)
+        msg = 'Güvenilir tartım yok.'; return
+    end
+    th  = [T.theta].';
+    kol = ([T.Warka].' .* ([T.aftX].' - s.xMain)) ./ [T.W].';
+    A   = [cos(th) sin(th)];
+
+    if numel(unique(round(th,6))) < 2
+        xb  = mean(kol ./ cos(th));                      % >>> DENKLEMİ BURAYA GİRİN <<<
+        CGx = s.xMain + xb;
+        msg = 'CGz için farklı Δz ile en az bir güvenilir tartım daha gerekli.';
+        return
+    end
+    sol = A \ kol;                                       % >>> DENKLEMİ BURAYA GİRİN <<<
+    CGx = s.xMain + sol(1);                              % >>> DENKLEMİ BURAYA GİRİN <<<
+    CGz = s.zMain + sol(2);                              % >>> DENKLEMİ BURAYA GİRİN <<<
+    msg = sprintf('%d güvenilir tartımdan en küçük kareler çözümü.', numel(T));
+end
+
+% ------------- DENKLEM-7 : Optimal arka jack iniş mesafesi ---------------
+%  CGz hatası ≈ sqrt(2)*L*σW / (W*tanθ)   (düz + eğik tartım hatası)
+%  Hedef hassasiyeti sağlayan en küçük açı seçilir, maks. açı ile sınırlanır.
+%  Çıktı : dzOpt [mm], sigZ [mm] beklenen CGz hassasiyeti, sinirlandi [bool]
+function [dzOpt, sigZ, sinirlandi] = denk_optimalDz(L, W, sigW, sigZhedef, thetaMax)
+    tanReq = sqrt(2)*L*sigW / (W*sigZhedef);             % >>> DENKLEMİ BURAYA GİRİN <<<
+    thReq  = atan(tanReq);
+    sinirlandi = thReq > thetaMax;
+    th     = min(thReq, thetaMax);
+    dzOpt  = L*sin(th);                                  % >>> DENKLEMİ BURAYA GİRİN <<<
+    sigZ   = sqrt(2)*L*sigW / (W*tan(max(th,eps)));      % >>> DENKLEMİ BURAYA GİRİN <<<
+end
+
+
+% =========================================================================
+%                          YARDIMCI FONKSİYONLAR
+% =========================================================================
+function T = bosTartimListesi()
+    T = struct('istasyon',{},'dz',{},'Wsol',{},'Wsag',{},'Warka',{},'W',{}, ...
+               'theta',{},'CGx',{},'aftX',{},'aftZ',{},'p1x',{},'p1z',{}, ...
+               'p2x',{},'p2z',{},'guvenilir',{},'notlar',{});
+end
+
+function etiket(g, r, c, metin)
+    h = uilabel(g,'Text',metin);
+    h.Layout.Row = r; h.Layout.Column = c;
+end
+
+function baslik(g, r, metin)
+    h = uilabel(g,'Text',metin,'FontWeight','bold','FontColor',[0 0.3 0.6]);
+    h.Layout.Row = r; h.Layout.Column = [1 2];
+end
+
+function yerlestir(h, r, c)
+    h.Layout.Row = r; h.Layout.Column = c;
+end
