@@ -1,0 +1,504 @@
+' =====================================================================================
+'  NX JOURNAL : MONTAJ - SADECE DIŞ YÜZEY ANALİZİ
+' -------------------------------------------------------------------------------------
+'  - Montajdaki tüm solid gövdeleri (veya seçtiklerinizi) toplar.
+'  - Her yüzü uyarlamalı örnekler (önce kaba, yüz kısmen dışta ise sıklaştırır).
+'  - Her noktadan dışarı 5 ışın atar; biri bile hiçbir gövdeye çarpmadan kaçarsa
+'    o nokta DIŞ YÜZEYdir.
+'  - Her yüz için: toplam alan, dış alan, dış bölgenin merkezi (X,Y,Z), normal.
+'  - Sonuç: Info penceresi + montaj klasörüne CSV.
+'
+'  Çalıştırma: dosyayı .vb uzantısıyla kaydedin -> Alt+F8 -> Browse -> Run
+' =====================================================================================
+Option Strict Off
+Imports System
+Imports System.IO
+Imports System.Text
+Imports System.Collections.Generic
+Imports System.Globalization
+Imports System.Diagnostics
+Imports NXOpen
+Imports NXOpen.UF
+Imports NXOpen.Assemblies
+Imports NXOpenUI
+
+Module SadeceDisYuzeyAnalizi
+
+    ' ------------------------------- AYARLAR -------------------------------
+    Dim SAMPLE_STEP As Double = 50.0       ' Hedef örnek aralığı (mm) - çalışırken sorulur
+    Dim COARSE_FACTOR As Double = 3.0      ' Kaba tarama aralığı = SAMPLE_STEP x bu katsayı
+    Dim MAX_N_COARSE As Integer = 6        ' Kaba taramada yön başına max nokta
+    Dim MAX_N_FINE As Integer = 20         ' İnce taramada yön başına max nokta
+    Dim EPS As Double = 0.02               ' Işın başlangıç ofseti (mm)
+    Dim HIGHLIGHT_RESULTS As Boolean = True
+    ' -----------------------------------------------------------------------
+
+    Dim theSession As Session = Session.GetSession()
+    Dim theUI As UI = UI.GetUI()
+    Dim ufs As UFSession = UFSession.GetUFSession()
+    Dim lw As ListingWindow = theSession.ListingWindow
+    Dim dispPart As Part
+    Dim allBodyTags() As Tag
+    Dim identityMtx(15) As Double
+    Dim areaUnit As Unit
+    Dim lengthUnit As Unit
+
+    Class FaceInfo
+        Public Face As Face
+        Public BodyTag As Tag
+        Public CompName As String
+        Public BodyName As String
+        Public Index As Integer
+        Public FlipKnown As Boolean = False
+        Public Flip As Boolean = False
+    End Class
+
+    Class Sample
+        Public P(2) As Double
+        Public N(2) As Double
+        Public W As Double
+        Public IsOuter As Boolean
+    End Class
+
+    Class OuterRow
+        Public FI As FaceInfo
+        Public FaceArea As Double
+        Public OuterArea As Double
+        Public C(2) As Double
+        Public N(2) As Double
+    End Class
+
+    ' ================================== MAIN ==================================
+    Sub Main(ByVal args() As String)
+        Try
+            RunAnalysis()
+        Catch ex As Exception
+            lw.Open()
+            lw.WriteLine("!!! BEKLENMEYEN HATA !!!")
+            lw.WriteLine(ex.ToString())
+            theUI.NXMessageBox.Show("Dış Yüzey", NXMessageBox.DialogType.Error, ex.Message)
+        End Try
+    End Sub
+
+    Sub RunAnalysis()
+        dispPart = theSession.Parts.Display
+        If dispPart Is Nothing Then
+            theUI.NXMessageBox.Show("Dış Yüzey", NXMessageBox.DialogType.Error, "Açık bir montaj yok.")
+            Return
+        End If
+        lw.Open()
+
+        Dim isInch As Boolean = (dispPart.PartUnits = BasePart.Units.Inches)
+        Dim u As String = If(isInch, "in", "mm")
+        If isInch Then
+            SAMPLE_STEP = SAMPLE_STEP / 25.4
+            EPS = EPS / 25.4
+        End If
+        Try
+            SAMPLE_STEP = NXInputBox.GetInputNumber("Hedef örnek aralığı (" & u & "):" & vbCrLf & _
+                          "Küçük = hassas ama yavaş. 2-3 m'lik yapı için 50 önerilir.", "Örnek Aralığı", SAMPLE_STEP)
+        Catch ex As Exception
+        End Try
+        If SAMPLE_STEP <= 0 Then SAMPLE_STEP = If(isInch, 2.0, 50.0)
+        ufs.Mtx4.Identity(identityMtx)
+        Try
+            areaUnit = dispPart.UnitCollection.GetBase("Area")
+            lengthUnit = dispPart.UnitCollection.GetBase("Length")
+        Catch ex As Exception
+        End Try
+
+        ' ---- Gövdeler ----
+        Dim bodies As List(Of Body) = SelectBodies()
+        If bodies Is Nothing Then Return
+        If bodies.Count = 0 Then bodies = CollectAllBodies(dispPart)
+        If bodies.Count = 0 Then
+            theUI.NXMessageBox.Show("Dış Yüzey", NXMessageBox.DialogType.Error, "Solid gövde bulunamadı.")
+            Return
+        End If
+
+        Dim sw As Stopwatch = Stopwatch.StartNew()
+        Dim faces As New List(Of FaceInfo)
+        Dim tagList As New List(Of Tag)
+        For Each b As Body In bodies
+            tagList.Add(b.Tag)
+            Dim cName As String = If(b.IsOccurrence AndAlso b.OwningComponent IsNot Nothing, b.OwningComponent.DisplayName, dispPart.Leaf)
+            Dim idx As Integer = 0
+            For Each f As Face In b.GetFaces()
+                idx += 1
+                Dim fi As New FaceInfo()
+                fi.Face = f : fi.BodyTag = b.Tag : fi.CompName = cName
+                fi.BodyName = b.JournalIdentifier : fi.Index = idx
+                faces.Add(fi)
+            Next
+        Next
+        allBodyTags = tagList.ToArray()
+
+        lw.WriteLine("==================== DIŞ YÜZEY ANALİZİ ====================")
+        lw.WriteLine("Montaj        : " & dispPart.Leaf)
+        lw.WriteLine("Gövde / Yüz   : " & bodies.Count.ToString() & " / " & faces.Count.ToString())
+        lw.WriteLine("Örnek aralığı : " & SAMPLE_STEP.ToString() & " " & u)
+        lw.WriteLine("")
+
+        ' ---- Analiz ----
+        Dim rows As New List(Of OuterRow)
+        Dim errorCount As Integer = 0
+        For k As Integer = 0 To faces.Count - 1
+            Dim fi As FaceInfo = faces(k)
+            If k Mod 20 = 0 Then Status("Dış yüzey analizi: " & (k + 1).ToString() & " / " & faces.Count.ToString())
+            If k Mod 200 = 0 Then lw.WriteLine("  ... yüz " & (k + 1).ToString() & " / " & faces.Count.ToString() & _
+                                                "  (" & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk)")
+            Try
+                ' Kaba tarama
+                Dim samples As List(Of Sample) = SampleFace(fi, SAMPLE_STEP * COARSE_FACTOR, MAX_N_COARSE)
+                If samples.Count = 0 Then Continue For
+                Dim nOut As Integer = 0
+                For Each s As Sample In samples
+                    s.IsOuter = EscapesToOutside(s)
+                    If s.IsOuter Then nOut += 1
+                Next
+                ' Yüz kısmen dışta ise sıklaştır
+                If nOut > 0 AndAlso nOut < samples.Count Then
+                    Dim fine As List(Of Sample) = SampleFace(fi, SAMPLE_STEP, MAX_N_FINE)
+                    If fine.Count > samples.Count Then
+                        For Each s As Sample In fine
+                            s.IsOuter = EscapesToOutside(s)
+                        Next
+                        samples = fine
+                    End If
+                End If
+                If nOut = 0 Then Continue For
+
+                Dim wTot As Double = 0, wOut As Double = 0
+                Dim cS(2) As Double, nS(2) As Double
+                For Each s As Sample In samples
+                    wTot += s.W
+                    If s.IsOuter Then
+                        wOut += s.W
+                        For c As Integer = 0 To 2
+                            cS(c) += s.P(c) * s.W
+                            nS(c) += s.N(c) * s.W
+                        Next
+                    End If
+                Next
+                If wOut <= 0 Then Continue For
+
+                Dim area As Double = FaceArea(fi.Face)
+                If area <= 0 Then area = wTot
+                Dim r As New OuterRow()
+                r.FI = fi : r.FaceArea = area
+                r.OuterArea = area * wOut / wTot
+                For c As Integer = 0 To 2 : r.C(c) = cS(c) / wOut : Next
+                r.N = Normalize(nS)
+                rows.Add(r)
+            Catch ex As Exception
+                errorCount += 1
+                If errorCount <= 50 Then lw.WriteLine("  HATA (atlandı): " & fi.CompName & " / F" & fi.Index.ToString() & " -> " & ex.Message)
+            End Try
+        Next
+
+        ' ---- Rapor ----
+        Dim baseDir As String = Path.GetTempPath()
+        Try
+            If File.Exists(dispPart.FullPath) Then baseDir = Path.GetDirectoryName(dispPart.FullPath)
+        Catch ex As Exception
+        End Try
+        Dim csvPath As String = Path.Combine(baseDir, dispPart.Leaf & "_DIS_YUZEYLER_" & DateTime.Now.ToString("yyyyMMdd_HHmmss") & ".csv")
+
+        Dim total As Double = 0
+        Dim perComp As New SortedDictionary(Of String, Double)
+        For Each r As OuterRow In rows
+            total += r.OuterArea
+            If perComp.ContainsKey(r.FI.CompName) Then perComp(r.FI.CompName) += r.OuterArea Else perComp.Add(r.FI.CompName, r.OuterArea)
+        Next
+
+        Try
+            Using wr As New StreamWriter(csvPath, False, New UTF8Encoding(True))
+                wr.WriteLine(J("Bileşen", "Gövde", "Yüz", "Yüz Tipi", "Yüz Toplam Alanı (" & u & "²)", "Dış Alan (" & u & "²)", _
+                               "Dış Oran (%)", "Merkez X", "Merkez Y", "Merkez Z", "Normal X", "Normal Y", "Normal Z"))
+                For Each r As OuterRow In rows
+                    wr.WriteLine(J(r.FI.CompName, r.FI.BodyName, "F" & r.FI.Index.ToString(), r.FI.Face.SolidFaceType.ToString(), _
+                                   Fmt(r.FaceArea), Fmt(r.OuterArea), Fmt(100.0 * r.OuterArea / Math.Max(r.FaceArea, 1.0E-12)), _
+                                   Fmt(r.C(0)), Fmt(r.C(1)), Fmt(r.C(2)), Fmt(r.N(0)), Fmt(r.N(1)), Fmt(r.N(2))))
+                Next
+            End Using
+        Catch ex As Exception
+            lw.WriteLine("CSV yazılamadı: " & ex.Message)
+        End Try
+
+        lw.WriteLine("")
+        lw.WriteLine("------------------------- ÖZET -------------------------")
+        lw.WriteLine("Dış yüzey sayısı       : " & rows.Count.ToString())
+        lw.WriteLine("Toplam dış yüzey alanı : " & Fmt(total) & " " & u & "²")
+        lw.WriteLine("Hata ile atlanan yüz   : " & errorCount.ToString())
+        lw.WriteLine("")
+        lw.WriteLine("Bileşen bazında dış alan:")
+        For Each kv As KeyValuePair(Of String, Double) In perComp
+            lw.WriteLine("  " & kv.Key & " : " & Fmt(kv.Value) & " " & u & "²")
+        Next
+        lw.WriteLine("")
+        lw.WriteLine("CSV  : " & csvPath)
+        lw.WriteLine("Süre : " & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk")
+        Status("Dış yüzey analizi tamamlandı.")
+
+        If HIGHLIGHT_RESULTS AndAlso rows.Count > 0 Then
+            Try
+                For Each r As OuterRow In rows : r.FI.Face.Highlight() : Next
+                theUI.NXMessageBox.Show("Görsel Kontrol", NXMessageBox.DialogType.Information, _
+                    "Dış yüzeyler vurgulandı (" & rows.Count.ToString() & " adet).")
+                For Each r As OuterRow In rows : r.FI.Face.Unhighlight() : Next
+            Catch ex As Exception
+            End Try
+        End If
+    End Sub
+
+    ' ============================== GÖVDE TOPLAMA ==============================
+    Function SelectBodies() As List(Of Body)
+        Dim mask(0) As Selection.MaskTriple
+        mask(0).Type = UFConstants.UF_solid_type
+        mask(0).Subtype = 0
+        mask(0).SolidBodySubtype = UFConstants.UF_UI_SEL_FEATURE_SOLID_BODY
+        Dim sel() As TaggedObject = Nothing
+        Dim resp As Selection.Response = theUI.SelectionManager.SelectTaggedObjects( _
+            "Gövdeleri seçin - HİÇ SEÇMEDEN 'Tamam' = TÜM MONTAJ", "Analiz Edilecek Gövdeler", _
+            Selection.SelectionScope.AnyInAssembly, Selection.SelectionAction.ClearAndEnableSpecific, _
+            False, False, mask, sel)
+        If resp = Selection.Response.Cancel OrElse resp = Selection.Response.Back Then Return Nothing
+        Dim list As New List(Of Body)
+        If sel IsNot Nothing Then
+            For Each o As TaggedObject In sel
+                Dim b As Body = TryCast(o, Body)
+                If b IsNot Nothing AndAlso b.IsSolidBody Then list.Add(b)
+            Next
+        End If
+        Return list
+    End Function
+
+    Function CollectAllBodies(p As Part) As List(Of Body)
+        Dim list As New List(Of Body)
+        For Each b As Body In p.Bodies
+            If b.IsSolidBody AndAlso Not b.IsBlanked Then list.Add(b)
+        Next
+        Dim root As Component = Nothing
+        Try
+            root = p.ComponentAssembly.RootComponent
+        Catch ex As Exception
+        End Try
+        If root IsNot Nothing Then CollectFromComponent(root, list)
+        Return list
+    End Function
+
+    Sub CollectFromComponent(comp As Component, list As List(Of Body))
+        For Each child As Component In comp.GetChildren()
+            If child.IsSuppressed Then Continue For
+            Dim proto As Part = TryCast(child.Prototype, Part)
+            If proto IsNot Nothing Then
+                Try
+                    If Not proto.IsFullyLoaded Then
+                        Dim pls As PartLoadStatus = proto.LoadThisPartFully()
+                        pls.Dispose()
+                    End If
+                Catch ex As Exception
+                End Try
+                For Each b As Body In proto.Bodies
+                    If Not b.IsSolidBody Then Continue For
+                    Dim occ As Body = Nothing
+                    Try
+                        occ = TryCast(child.FindOccurrence(b), Body)
+                    Catch ex As Exception
+                    End Try
+                    If occ IsNot Nothing AndAlso Not occ.IsBlanked Then list.Add(occ)
+                Next
+            End If
+            CollectFromComponent(child, list)
+        Next
+    End Sub
+
+    ' ================================ ÖRNEKLEME ================================
+    Function SampleFace(fi As FaceInfo, stepLen As Double, maxN As Integer) As List(Of Sample)
+        Dim res As New List(Of Sample)
+        Dim uv(3) As Double
+        Try
+            ufs.Modl.AskFaceUvMinmax(fi.Face.Tag, uv)
+        Catch ex As Exception
+            Return res
+        End Try
+
+        ' Yüzün u ve v yönündeki gerçek uzunluğu (tahmini)
+        Dim Lu As Double = 0, Lv As Double = 0
+        For Each fr As Double In New Double() {0.25, 0.5, 0.75}
+            Dim prm() As Double = {uv(0) + fr * (uv(1) - uv(0)), uv(2) + fr * (uv(3) - uv(2))}
+            Dim pt(2), u1(2), v1(2), u2(2), v2(2), nrm(2), rad(1) As Double
+            Try
+                ufs.Modl.AskFaceProps(fi.Face.Tag, prm, pt, u1, v1, u2, v2, nrm, rad)
+                Lu = Math.Max(Lu, VLen(u1) * Math.Abs(uv(1) - uv(0)))
+                Lv = Math.Max(Lv, VLen(v1) * Math.Abs(uv(3) - uv(2)))
+            Catch ex As Exception
+            End Try
+        Next
+        Dim nu As Integer = CInt(Math.Max(2, Math.Min(maxN, Math.Ceiling(Lu / stepLen))))
+        Dim nv As Integer = CInt(Math.Max(2, Math.Min(maxN, Math.Ceiling(Lv / stepLen))))
+
+        For attempt As Integer = 0 To 2
+            res.Clear()
+            Dim du As Double = (uv(1) - uv(0)) / nu
+            Dim dv As Double = (uv(3) - uv(2)) / nv
+            For i As Integer = 0 To nu - 1
+                For j As Integer = 0 To nv - 1
+                    Dim prm() As Double = {uv(0) + (i + 0.5) * du, uv(2) + (j + 0.5) * dv}
+                    Dim pt(2), u1(2), v1(2), u2(2), v2(2), nrm(2), rad(1) As Double
+                    Try
+                        ufs.Modl.AskFaceProps(fi.Face.Tag, prm, pt, u1, v1, u2, v2, nrm, rad)
+                        Dim pst As Integer = 0
+                        ufs.Modl.AskPointContainment(pt, fi.Face.Tag, pst)
+                        If pst = 2 Then Continue For   ' yüz sınırı dışında
+                    Catch ex As Exception
+                        Continue For
+                    End Try
+                    Dim s As New Sample()
+                    s.P = pt : s.N = Normalize(nrm)
+                    s.W = VLen(Cross(u1, v1)) * Math.Abs(du * dv)
+                    If s.W <= 0 Then s.W = 0.000000000001
+                    res.Add(s)
+                Next
+            Next
+            If res.Count >= 2 Then Exit For
+            nu *= 2 : nv *= 2
+        Next
+
+        ' Normalleri malzemenin dışına çevir
+        If res.Count > 0 Then
+            If Not fi.FlipKnown Then
+                fi.FlipKnown = True
+                Dim e As Double = EPS * 2
+                For t As Integer = 0 To 2
+                    Dim test() As Double = Add(res(0).P, Scale(res(0).N, e))
+                    Dim pst As Integer = 0
+                    Try
+                        ufs.Modl.AskPointContainment(test, fi.BodyTag, pst)
+                    Catch ex As Exception
+                        Exit For
+                    End Try
+                    If pst = 1 Then
+                        fi.Flip = True
+                        Exit For
+                    ElseIf pst = 2 Then
+                        Exit For
+                    End If
+                    e *= 3
+                Next
+            End If
+            If fi.Flip Then
+                For Each s As Sample In res : s.N = Scale(s.N, -1.0) : Next
+            End If
+        End If
+        Return res
+    End Function
+
+    ' =========================== DIŞARI KAÇMA TESTİ ===========================
+    Function EscapesToOutside(s As Sample) As Boolean
+        Dim origin() As Double = Add(s.P, Scale(s.N, EPS))
+        Dim t1() As Double = Perp(s.N)
+        Dim t2() As Double = Cross(s.N, t1)
+        Dim dirs As New List(Of Double())
+        dirs.Add(s.N)
+        Dim a As Double = 60.0 * Math.PI / 180.0
+        For Each az As Double In New Double() {0.0, 90.0, 180.0, 270.0}
+            Dim b As Double = az * Math.PI / 180.0
+            Dim t() As Double = Add(Scale(t1, Math.Cos(b)), Scale(t2, Math.Sin(b)))
+            dirs.Add(Normalize(Add(Scale(s.N, Math.Cos(a)), Scale(t, Math.Sin(a)))))
+        Next
+        For Each d As Double() In dirs
+            Dim nRes As Integer = 0
+            Dim hits() As UFModl.RayHitPointInfo = Nothing
+            Try
+                ufs.Modl.TraceARay(allBodyTags.Length, allBodyTags, origin, d, identityMtx, 1, nRes, hits)
+            Catch ex As Exception
+                Continue For
+            End Try
+            If nRes = 0 Then Return True
+        Next
+        Return False
+    End Function
+
+    ' ================================ YARDIMCI ================================
+    Function FaceArea(f As Face) As Double
+        If areaUnit Is Nothing Then Return -1
+        Try
+            Dim arr() As IParameterizedSurface = {f}
+            Dim mf As Object = dispPart.MeasureManager.NewFaceProperties(areaUnit, lengthUnit, 0.99, arr)
+            Dim ar As Double = mf.Area
+            Try
+                mf.Dispose()
+            Catch ex2 As Exception
+            End Try
+            Return ar
+        Catch ex As Exception
+            Return -1
+        End Try
+    End Function
+
+    Function J(ParamArray vals() As String) As String
+        Dim sb As New StringBuilder()
+        For i As Integer = 0 To vals.Length - 1
+            If i > 0 Then sb.Append(";")
+            Dim v As String = If(vals(i), "")
+            If v.Contains(";") OrElse v.Contains("""") Then v = """" & v.Replace("""", """""") & """"
+            sb.Append(v)
+        Next
+        Return sb.ToString()
+    End Function
+
+    Function Fmt(x As Double) As String
+        Return x.ToString("0.####", CultureInfo.CurrentCulture)
+    End Function
+
+    Sub Status(msg As String)
+        Try
+            ufs.Ui.SetStatus(msg)
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    Function Dot(a() As Double, b() As Double) As Double
+        Return a(0) * b(0) + a(1) * b(1) + a(2) * b(2)
+    End Function
+
+    Function Cross(a() As Double, b() As Double) As Double()
+        Return New Double() {a(1) * b(2) - a(2) * b(1), a(2) * b(0) - a(0) * b(2), a(0) * b(1) - a(1) * b(0)}
+    End Function
+
+    Function VLen(a() As Double) As Double
+        Return Math.Sqrt(Dot(a, a))
+    End Function
+
+    Function Normalize(a() As Double) As Double()
+        Dim l As Double = VLen(a)
+        If l < 1.0E-15 Then Return New Double() {0, 0, 0}
+        Return New Double() {a(0) / l, a(1) / l, a(2) / l}
+    End Function
+
+    Function Add(a() As Double, b() As Double) As Double()
+        Return New Double() {a(0) + b(0), a(1) + b(1), a(2) + b(2)}
+    End Function
+
+    Function Scale(a() As Double, k As Double) As Double()
+        Return New Double() {a(0) * k, a(1) * k, a(2) * k}
+    End Function
+
+    Function Perp(n() As Double) As Double()
+        Dim ax() As Double
+        If Math.Abs(n(0)) <= Math.Abs(n(1)) AndAlso Math.Abs(n(0)) <= Math.Abs(n(2)) Then
+            ax = New Double() {1, 0, 0}
+        ElseIf Math.Abs(n(1)) <= Math.Abs(n(2)) Then
+            ax = New Double() {0, 1, 0}
+        Else
+            ax = New Double() {0, 0, 1}
+        End If
+        Return Normalize(Cross(n, ax))
+    End Function
+
+    Public Function GetUnloadOption(ByVal dummy As String) As Integer
+        Return CInt(Session.LibraryUnloadOption.Immediately)
+    End Function
+
+End Module

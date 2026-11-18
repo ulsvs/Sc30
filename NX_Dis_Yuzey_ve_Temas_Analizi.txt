@@ -613,7 +613,7 @@ Module DisYuzeyVeTemasAnalizi
                 dirs.Add(Normalize(Add(Scale(s.N, Math.Cos(a)), Scale(t, Math.Sin(a)))))
             Next
         Next
-        For Each d() As Double In dirs
+        For Each d As Double() In dirs
             Dim nRes As Integer = 0
             Dim hits() As UFModl.RayHitPointInfo = Nothing
             Try
