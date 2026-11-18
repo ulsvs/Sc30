@@ -3,7 +3,8 @@
 ' -------------------------------------------------------------------------------------
 '  Ne yapar?
 '   1) Montajdaki tüm solid gövdeleri (veya sizin seçtiklerinizi) toplar.
-'   2) Her yüzeyi N x N noktadan örnekler.
+'   2) Her yüzeyi UYARLAMALI örnekler: önce kaba ızgara; yüzün bir kısmı dış, bir kısmı
+'      temas/iç çıkarsa sadece o yüz hedef aralıkla (örn. 50 mm) sıklaştırılır.
 '   3) Her örnek noktası için:
 '        - Başka bir parçanın yüzeyi, "boşluk toleransı" mesafesinde ve KARŞILIKLI
 '          (normaller birbirine bakıyor) ise  -> TEMAS bölgesi
@@ -33,7 +34,10 @@ Module DisYuzeyVeTemasAnalizi
 
     ' ------------------------------- VARSAYILAN AYARLAR -------------------------------
     Dim GAP_TOL As Double = 1.0            ' Temas sayılacak max boşluk (mm) - çalışırken sorulur
-    Dim GRID_N As Integer = 8              ' Yüz başına N x N örnek nokta   - çalışırken sorulur
+    Dim STEP As Double = 50.0              ' Hedef örnek aralığı (mm)       - çalışırken sorulur
+    Dim COARSE_FACTOR As Double = 3.0      ' Kaba ön tarama aralığı = STEP x bu katsayı
+    Dim MAX_N_COARSE As Integer = 6        ' Kaba taramada yön başına max nokta
+    Dim MAX_N_FINE As Integer = 20         ' İnce taramada yön başına max nokta (büyük yüzlerde süre sınırı)
     Dim NORMAL_ANGLE_DEG As Double = 30.0  ' Karşılıklı yüzlerin paralellikten sapma toleransı (derece)
     Dim EPS As Double = 0.02               ' Yüzeyden ışın başlangıç ofseti (mm)
     Dim HIGHLIGHT_RESULTS As Boolean = True ' Sonunda dış/temas yüzeylerini ekranda vurgula
@@ -80,6 +84,9 @@ Module DisYuzeyVeTemasAnalizi
         Public P(2) As Double
         Public N(2) As Double
         Public W As Double
+        Public Cls As Integer = 0          ' 0 = iç, 1 = dış, 2 = temas
+        Public Partner As FaceInfo = Nothing
+        Public Dist As Double = 0
     End Class
 
     Class ContactAcc
@@ -136,6 +143,7 @@ Module DisYuzeyVeTemasAnalizi
         If isInch Then
             GAP_TOL = GAP_TOL / 25.4
             EPS = EPS / 25.4
+            STEP = STEP / 25.4
         End If
 
         ' ---- Parametreler ----
@@ -143,13 +151,13 @@ Module DisYuzeyVeTemasAnalizi
             GAP_TOL = NXInputBox.GetInputNumber("Temas sayılacak MAKSİMUM boşluk (" & u & "):" & vbCrLf & _
                                                 "(Modeldeki boşluktan biraz büyük girin, örn. boşluk 0.5 ise 0.8)", _
                                                 "Temas Toleransı", GAP_TOL)
-            GRID_N = CInt(NXInputBox.GetInputNumber("Yüz başına örnekleme ızgarası N (N x N nokta)." & vbCrLf & _
-                                                    "Büyük = hassas ama yavaş. Önerilen 6 - 12", _
-                                                    "Hassasiyet", GRID_N))
+            STEP = NXInputBox.GetInputNumber("Hedef örnek aralığı (" & u & ")." & vbCrLf & _
+                                             "Küçük = hassas ama yavaş. 2-3 m'lik yapı için 30-60 önerilir.", _
+                                             "Örnek Aralığı", STEP)
         Catch ex As Exception
         End Try
         If GAP_TOL <= 0 Then GAP_TOL = 0.0001
-        GRID_N = Math.Max(3, Math.Min(30, GRID_N))
+        If STEP <= 0 Then STEP = If(isInch, 2.0, 50.0)
         EPS = Math.Min(EPS, GAP_TOL / 4.0)
         COS_LIM = Math.Cos(NORMAL_ANGLE_DEG * Math.PI / 180.0)
         ufs.Mtx4.Identity(identityMtx)
@@ -176,7 +184,7 @@ Module DisYuzeyVeTemasAnalizi
         lw.WriteLine("Montaj           : " & dispPart.Leaf)
         lw.WriteLine("Gövde sayısı     : " & bodies.Count.ToString())
         lw.WriteLine("Boşluk toleransı : " & GAP_TOL.ToString() & " " & u)
-        lw.WriteLine("Izgara           : " & GRID_N.ToString() & " x " & GRID_N.ToString())
+        lw.WriteLine("Örnek aralığı    : " & STEP.ToString() & " " & u & "  (kaba ön tarama: " & (STEP * COARSE_FACTOR).ToString() & " " & u & ")")
         lw.WriteLine("")
 
         ' ---- Bilgi yapıları ----
@@ -234,6 +242,7 @@ Module DisYuzeyVeTemasAnalizi
         Dim skipped As Integer = 0
         Dim internalCount As Integer = 0
         Dim errorCount As Integer = 0
+        Dim refinedCount As Integer = 0
 
         For k As Integer = 0 To allFaces.Count - 1
             Dim fi As FaceInfo = allFaces(k)
@@ -242,10 +251,29 @@ Module DisYuzeyVeTemasAnalizi
                                                 "  (" & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk)")
             Try
 
-            Dim samples As List(Of Sample) = SampleFace(fi, GRID_N)
+            ' --- UYARLAMALI ÖRNEKLEME ---
+            ' 1) Kaba ızgara ile tara. 2) Noktalar farklı sınıflara düşüyorsa (yüzün bir kısmı
+            '    dış, bir kısmı temas/iç) sadece O yüzü ince ızgarayla yeniden tara.
+            Dim samples As List(Of Sample) = SampleFace(fi, STEP * COARSE_FACTOR, MAX_N_COARSE)
             If samples.Count = 0 Then
                 skipped += 1
                 Continue For
+            End If
+
+            Dim mixed As Boolean = False
+            For Each s As Sample In samples
+                ClassifySample(fi, s)
+                If s.Cls <> samples(0).Cls OrElse s.Partner IsNot samples(0).Partner Then mixed = True
+            Next
+            If mixed Then
+                Dim fine As List(Of Sample) = SampleFace(fi, STEP, MAX_N_FINE)
+                If fine.Count > samples.Count Then
+                    For Each s As Sample In fine
+                        ClassifySample(fi, s)
+                    Next
+                    samples = fine
+                    refinedCount += 1
+                End If
             End If
 
             Dim wTot As Double = 0, wOut As Double = 0
@@ -254,40 +282,17 @@ Module DisYuzeyVeTemasAnalizi
 
             For Each s As Sample In samples
                 wTot += s.W
-
-                ' -- Temas kontrolü --
-                Dim best As FaceInfo = Nothing
-                Dim bestD As Double = Double.MaxValue
-                For Each fb As FaceInfo In fi.Partners
-                    If Not PointInBox(s.P, fb.BBox, GAP_TOL) Then Continue For
-                    Dim q(2) As Double
-                    Dim d As Double = PointToFace(s.P, fb.Face.Tag, q)
-                    If d > GAP_TOL + TINY Then Continue For
-                    If d > TINY * 10 Then
-                        Dim dirv() As Double = Scale(Subtract(q, s.P), 1.0 / d)
-                        If Dot(dirv, s.N) < 0.5 Then Continue For  ' karşı yüz önümüzde değil
-                    End If
-                    Dim nb() As Double = NormalAt(fb, q)
-                    If nb Is Nothing Then Continue For
-                    If Dot(s.N, nb) > -COS_LIM Then Continue For    ' yüzler birbirine bakmıyor
-                    ' Arada başka bir parça/ince sac varsa (tolerans > sac kalınlığı durumu) bu temas değildir
-                    If d > EPS * 4 AndAlso IsOccluded(s, q, d) Then Continue For
-                    If d < bestD Then
-                        bestD = d : best = fb
-                    End If
-                Next
-
-                If best IsNot Nothing Then
+                If s.Cls = 2 Then
                     Dim acc As ContactAcc = Nothing
-                    If Not accs.TryGetValue(best, acc) Then
-                        acc = New ContactAcc() : acc.Partner = best
-                        accs.Add(best, acc)
+                    If Not accs.TryGetValue(s.Partner, acc) Then
+                        acc = New ContactAcc() : acc.Partner = s.Partner
+                        accs.Add(s.Partner, acc)
                     End If
                     acc.W += s.W
                     For c As Integer = 0 To 2 : acc.S(c) += s.P(c) * s.W : Next
-                    acc.MinGap = Math.Min(acc.MinGap, bestD)
-                    acc.MaxGap = Math.Max(acc.MaxGap, bestD)
-                ElseIf EscapesToOutside(s) Then
+                    acc.MinGap = Math.Min(acc.MinGap, s.Dist)
+                    acc.MaxGap = Math.Max(acc.MaxGap, s.Dist)
+                ElseIf s.Cls = 1 Then
                     wOut += s.W
                     For c As Integer = 0 To 2
                         outS(c) += s.P(c) * s.W
@@ -364,6 +369,7 @@ Module DisYuzeyVeTemasAnalizi
         lw.WriteLine("İç (raporlanmayan) yüz : " & internalCount.ToString())
         lw.WriteLine("Örneklenemeyen yüz     : " & skipped.ToString())
         lw.WriteLine("Hata nedeniyle atlanan : " & errorCount.ToString())
+        lw.WriteLine("İnce taranan yüz       : " & refinedCount.ToString())
         lw.WriteLine("")
 
         ' Parça çiftleri bazında temas toplamı
@@ -461,7 +467,9 @@ Module DisYuzeyVeTemasAnalizi
     End Sub
 
     ' ================================== ÖRNEKLEME =====================================
-    Function SampleFace(fi As FaceInfo, n As Integer) As List(Of Sample)
+    ' stepLen: hedef nokta aralığı (model birimi). Yön başına nokta sayısı yüzün gerçek
+    ' boyutundan hesaplanır, [2 .. maxN] arasında sınırlanır.
+    Function SampleFace(fi As FaceInfo, stepLen As Double, maxN As Integer) As List(Of Sample)
         Dim res As New List(Of Sample)
         Dim uv(3) As Double
         Try
@@ -470,13 +478,27 @@ Module DisYuzeyVeTemasAnalizi
             Return res
         End Try
 
-        Dim nn As Integer = n
+        ' u ve v yönündeki gerçek uzunlukları tahmin et (3 noktada türev)
+        Dim Lu As Double = 0, Lv As Double = 0
+        For Each fr As Double In New Double() {0.25, 0.5, 0.75}
+            Dim prm() As Double = {uv(0) + fr * (uv(1) - uv(0)), uv(2) + fr * (uv(3) - uv(2))}
+            Dim pt(2), u1(2), v1(2), u2(2), v2(2), nrm(2), rad(1) As Double
+            Try
+                ufs.Modl.AskFaceProps(fi.Face.Tag, prm, pt, u1, v1, u2, v2, nrm, rad)
+                Lu = Math.Max(Lu, VLen(u1) * Math.Abs(uv(1) - uv(0)))
+                Lv = Math.Max(Lv, VLen(v1) * Math.Abs(uv(3) - uv(2)))
+            Catch ex As Exception
+            End Try
+        Next
+        Dim nu As Integer = CInt(Math.Max(2, Math.Min(maxN, Math.Ceiling(Lu / stepLen))))
+        Dim nv As Integer = CInt(Math.Max(2, Math.Min(maxN, Math.Ceiling(Lv / stepLen))))
+
         For attempt As Integer = 0 To 2
             res.Clear()
-            Dim du As Double = (uv(1) - uv(0)) / nn
-            Dim dv As Double = (uv(3) - uv(2)) / nn
-            For i As Integer = 0 To nn - 1
-                For j As Integer = 0 To nn - 1
+            Dim du As Double = (uv(1) - uv(0)) / nu
+            Dim dv As Double = (uv(3) - uv(2)) / nv
+            For i As Integer = 0 To nu - 1
+                For j As Integer = 0 To nv - 1
                     Dim prm() As Double = {uv(0) + (i + 0.5) * du, uv(2) + (j + 0.5) * dv}
                     Dim pt(2), u1(2), v1(2), u2(2), v2(2), nrm(2), rad(1) As Double
                     Try
@@ -494,8 +516,8 @@ Module DisYuzeyVeTemasAnalizi
                     res.Add(s)
                 Next
             Next
-            If res.Count >= 4 Then Exit For
-            nn *= 2   ' küçük/dar yüz: ızgarayı sıklaştır
+            If res.Count >= 2 Then Exit For
+            nu *= 2 : nv *= 2   ' kırpılmış/dar yüz: noktaların çoğu dışarıda kaldı, sıklaştır
         Next
 
         If res.Count > 0 Then
@@ -547,6 +569,35 @@ Module DisYuzeyVeTemasAnalizi
         Return n
     End Function
 
+    ' ============================== NOKTA SINIFLANDIRMA ===============================
+    Sub ClassifySample(fi As FaceInfo, s As Sample)
+        Dim best As FaceInfo = Nothing
+        Dim bestD As Double = Double.MaxValue
+        For Each fb As FaceInfo In fi.Partners
+            If Not PointInBox(s.P, fb.BBox, GAP_TOL) Then Continue For
+            Dim q(2) As Double
+            Dim d As Double = PointToFace(s.P, fb.Face.Tag, q)
+            If d > GAP_TOL + TINY OrElse d >= bestD Then Continue For
+            If d > TINY * 10 Then
+                Dim dirv() As Double = Scale(Subtract(q, s.P), 1.0 / d)
+                If Dot(dirv, s.N) < 0.5 Then Continue For      ' karşı yüz önümüzde değil
+            End If
+            Dim nb() As Double = NormalAt(fb, q)
+            If nb Is Nothing Then Continue For
+            If Dot(s.N, nb) > -COS_LIM Then Continue For        ' yüzler birbirine bakmıyor
+            ' Arada başka parça/ince sac varsa (tolerans > sac kalınlığı) temas değildir
+            If d > EPS * 4 AndAlso IsOccluded(s, q, d) Then Continue For
+            bestD = d : best = fb
+        Next
+        If best IsNot Nothing Then
+            s.Cls = 2 : s.Partner = best : s.Dist = bestD
+        ElseIf EscapesToOutside(s) Then
+            s.Cls = 1
+        Else
+            s.Cls = 0
+        End If
+    End Sub
+
     ' ================================ DIŞARI KAÇMA TESTİ ==============================
     Function EscapesToOutside(s As Sample) As Boolean
         Dim origin() As Double = Add(s.P, Scale(s.N, EPS))
@@ -554,7 +605,7 @@ Module DisYuzeyVeTemasAnalizi
         Dim t2() As Double = Cross(s.N, t1)
         Dim dirs As New List(Of Double())
         dirs.Add(s.N)
-        For Each angDeg As Double In New Double() {45.0, 75.0}
+        For Each angDeg As Double In New Double() {60.0}
             Dim a As Double = angDeg * Math.PI / 180.0
             For Each az As Double In New Double() {0.0, 90.0, 180.0, 270.0}
                 Dim b As Double = az * Math.PI / 180.0
