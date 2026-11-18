@@ -34,8 +34,8 @@ Module DisYuzeyVeTemasAnalizi
 
     ' ------------------------------- VARSAYILAN AYARLAR -------------------------------
     Dim GAP_TOL As Double = 1.0            ' Temas sayılacak max boşluk (mm) - çalışırken sorulur
-    Dim STEP As Double = 50.0              ' Hedef örnek aralığı (mm)       - çalışırken sorulur
-    Dim COARSE_FACTOR As Double = 3.0      ' Kaba ön tarama aralığı = STEP x bu katsayı
+    Dim SAMPLE_STEP As Double = 50.0              ' Hedef örnek aralığı (mm)       - çalışırken sorulur
+    Dim COARSE_FACTOR As Double = 3.0      ' Kaba ön tarama aralığı = SAMPLE_STEP x bu katsayı
     Dim MAX_N_COARSE As Integer = 6        ' Kaba taramada yön başına max nokta
     Dim MAX_N_FINE As Integer = 20         ' İnce taramada yön başına max nokta (büyük yüzlerde süre sınırı)
     Dim NORMAL_ANGLE_DEG As Double = 30.0  ' Karşılıklı yüzlerin paralellikten sapma toleransı (derece)
@@ -143,7 +143,7 @@ Module DisYuzeyVeTemasAnalizi
         If isInch Then
             GAP_TOL = GAP_TOL / 25.4
             EPS = EPS / 25.4
-            STEP = STEP / 25.4
+            SAMPLE_STEP = SAMPLE_STEP / 25.4
         End If
 
         ' ---- Parametreler ----
@@ -151,13 +151,13 @@ Module DisYuzeyVeTemasAnalizi
             GAP_TOL = NXInputBox.GetInputNumber("Temas sayılacak MAKSİMUM boşluk (" & u & "):" & vbCrLf & _
                                                 "(Modeldeki boşluktan biraz büyük girin, örn. boşluk 0.5 ise 0.8)", _
                                                 "Temas Toleransı", GAP_TOL)
-            STEP = NXInputBox.GetInputNumber("Hedef örnek aralığı (" & u & ")." & vbCrLf & _
+            SAMPLE_STEP = NXInputBox.GetInputNumber("Hedef örnek aralığı (" & u & ")." & vbCrLf & _
                                              "Küçük = hassas ama yavaş. 2-3 m'lik yapı için 30-60 önerilir.", _
-                                             "Örnek Aralığı", STEP)
+                                             "Örnek Aralığı", SAMPLE_STEP)
         Catch ex As Exception
         End Try
         If GAP_TOL <= 0 Then GAP_TOL = 0.0001
-        If STEP <= 0 Then STEP = If(isInch, 2.0, 50.0)
+        If SAMPLE_STEP <= 0 Then SAMPLE_STEP = If(isInch, 2.0, 50.0)
         EPS = Math.Min(EPS, GAP_TOL / 4.0)
         COS_LIM = Math.Cos(NORMAL_ANGLE_DEG * Math.PI / 180.0)
         ufs.Mtx4.Identity(identityMtx)
@@ -184,7 +184,7 @@ Module DisYuzeyVeTemasAnalizi
         lw.WriteLine("Montaj           : " & dispPart.Leaf)
         lw.WriteLine("Gövde sayısı     : " & bodies.Count.ToString())
         lw.WriteLine("Boşluk toleransı : " & GAP_TOL.ToString() & " " & u)
-        lw.WriteLine("Örnek aralığı    : " & STEP.ToString() & " " & u & "  (kaba ön tarama: " & (STEP * COARSE_FACTOR).ToString() & " " & u & ")")
+        lw.WriteLine("Örnek aralığı    : " & SAMPLE_STEP.ToString() & " " & u & "  (kaba ön tarama: " & (SAMPLE_STEP * COARSE_FACTOR).ToString() & " " & u & ")")
         lw.WriteLine("")
 
         ' ---- Bilgi yapıları ----
@@ -254,7 +254,7 @@ Module DisYuzeyVeTemasAnalizi
             ' --- UYARLAMALI ÖRNEKLEME ---
             ' 1) Kaba ızgara ile tara. 2) Noktalar farklı sınıflara düşüyorsa (yüzün bir kısmı
             '    dış, bir kısmı temas/iç) sadece O yüzü ince ızgarayla yeniden tara.
-            Dim samples As List(Of Sample) = SampleFace(fi, STEP * COARSE_FACTOR, MAX_N_COARSE)
+            Dim samples As List(Of Sample) = SampleFace(fi, SAMPLE_STEP * COARSE_FACTOR, MAX_N_COARSE)
             If samples.Count = 0 Then
                 skipped += 1
                 Continue For
@@ -266,7 +266,7 @@ Module DisYuzeyVeTemasAnalizi
                 If s.Cls <> samples(0).Cls OrElse s.Partner IsNot samples(0).Partner Then mixed = True
             Next
             If mixed Then
-                Dim fine As List(Of Sample) = SampleFace(fi, STEP, MAX_N_FINE)
+                Dim fine As List(Of Sample) = SampleFace(fi, SAMPLE_STEP, MAX_N_FINE)
                 If fine.Count > samples.Count Then
                     For Each s As Sample In fine
                         ClassifySample(fi, s)
