@@ -232,7 +232,7 @@ Module DisYuzeyVeTemasAnalizi
             End If
 
             Dim wTot As Double = 0, wOut As Double = 0
-            Dim oS(2) As Double, oN(2) As Double
+            Dim outS(2) As Double, outN(2) As Double
             Dim accs As New Dictionary(Of FaceInfo, ContactAcc)
 
             For Each s As Sample In samples
@@ -271,8 +271,8 @@ Module DisYuzeyVeTemasAnalizi
                 ElseIf EscapesToOutside(s) Then
                     wOut += s.W
                     For c As Integer = 0 To 2
-                        oS(c) += s.P(c) * s.W
-                        oN(c) += s.N(c) * s.W
+                        outS(c) += s.P(c) * s.W
+                        outN(c) += s.N(c) * s.W
                     Next
                 End If
             Next
@@ -289,8 +289,8 @@ Module DisYuzeyVeTemasAnalizi
                 Dim r As New OuterRow()
                 r.FI = fi : r.FaceArea = area
                 r.OuterArea = area * wOut / wTot
-                For c As Integer = 0 To 2 : r.C(c) = oS(c) / wOut : Next
-                r.N = Normalize(oN)
+                For c As Integer = 0 To 2 : r.C(c) = outS(c) / wOut : Next
+                r.N = Normalize(outN)
                 outerRows.Add(r)
             End If
 
@@ -460,7 +460,7 @@ Module DisYuzeyVeTemasAnalizi
                     Catch ex As Exception
                         Continue For
                     End Try
-                    Dim w As Double = Len(Cross(u1, v1)) * Math.Abs(du * dv)
+                    Dim w As Double = VLen(Cross(u1, v1)) * Math.Abs(du * dv)
                     If w <= 0 Then w = 0.000000000001
                     Dim s As New Sample()
                     s.P = pt : s.N = Normalize(nrm) : s.W = w
@@ -656,12 +656,12 @@ Module DisYuzeyVeTemasAnalizi
         Return New Double() {a(1) * b(2) - a(2) * b(1), a(2) * b(0) - a(0) * b(2), a(0) * b(1) - a(1) * b(0)}
     End Function
 
-    Function Len(a() As Double) As Double
+    Function VLen(a() As Double) As Double
         Return Math.Sqrt(Dot(a, a))
     End Function
 
     Function Normalize(a() As Double) As Double()
-        Dim l As Double = Len(a)
+        Dim l As Double = VLen(a)
         If l < 1.0E-15 Then Return New Double() {0, 0, 0}
         Return New Double() {a(0) / l, a(1) / l, a(2) / l}
     End Function
