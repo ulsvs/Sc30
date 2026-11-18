@@ -31,6 +31,7 @@ Module HizliSealant
     Dim MIN_BODY_SIZE As Double = 60.0     ' Bundan küçük gövdeleri atla       - sorulur
     Dim NORMAL_ANGLE_DEG As Double = 30.0  ' Sealant: yüzlerin paralellik toleransı (derece)
     Dim SKIP_HIDDEN As Boolean = True      ' Gizli (Hide) bileşenleri atla
+    Dim SEAL_KG_M2 As Double = 0.0         ' Sealant katsayısı (kg/m²)         - sorulur
     Dim CREATE_CG_POINTS As Boolean = False ' True: CG noktalarını modelde nokta olarak oluştur
     Dim SKIP_KEYWORDS() As String = {"civata", "cıvata", "bolt", "screw", "vida", "somun", "washer", "rondela", _
                                      "percin", "perçin", "rivet", "din912", "din933", "din931", "din934", "din125", _
@@ -117,6 +118,7 @@ Module HizliSealant
 
         SEAL_SPACING = AskNum("SEALANT tarama aralığı (" & u & ")." & vbCrLf & "Flanş genişliğinin ~1/5'i. Örn. 3-10.", "Sealant Aralığı", SEAL_SPACING)
         GAP_TOL = AskNum("SEALANT: üst üste sayılacak MAKSİMUM boşluk (" & u & ").", "Boşluk Toleransı", GAP_TOL)
+        SEAL_KG_M2 = AskNum("SEALANT katsayısı (kg/m²)." & vbCrLf & "Sealant alanı (m²) x bu katsayı = sealant ağırlığı. 0 = hesaplama.", "Sealant Katsayısı", SEAL_KG_M2)
         MIN_BODY_SIZE = AskNum("En büyük boyutu bundan KÜÇÜK gövdeler atlansın (" & u & "). 0 = kapalı.", "Küçük Parça Filtresi", MIN_BODY_SIZE)
         If OUT_SPACING <= 0 Then OUT_SPACING = If(isInch, 0.8, 20.0)
         If SEAL_SPACING <= 0 Then SEAL_SPACING = If(isInch, 0.2, 5.0)
@@ -187,6 +189,12 @@ Module HizliSealant
         lw.WriteLine("SEALANT (üst üste gelen yüzeyler, tek taraf)")
         lw.WriteLine("   Toplam alan      : " & F1(sealAcc.W) & " " & u & "²")
         lw.WriteLine("   Ağırlık merkezi  : X = " & F2(sealAcc.CG(0)) & "   Y = " & F2(sealAcc.CG(1)) & "   Z = " & F2(sealAcc.CG(2)))
+        Dim sealM2 As Double = sealAcc.W * If(isInch, 0.00064516, 0.000001)
+        lw.WriteLine("   Toplam alan (m²) : " & sealM2.ToString("N4") & " m²")
+        If SEAL_KG_M2 > 0 Then
+            lw.WriteLine("   Sealant katsayısı: " & SEAL_KG_M2.ToString("N4") & " kg/m²")
+            lw.WriteLine("   SEALANT AĞIRLIĞI : " & (sealM2 * SEAL_KG_M2).ToString("N3") & " kg")
+        End If
         If sealAcc.W > 0 Then
             lw.WriteLine("   Ortalama boşluk  : " & F2(sealAcc.GapW / sealAcc.W) & " " & u)
             lw.WriteLine("   Hacim tahmini    : " & F1(sealAcc.GapW) & " " & u & "³  (alan x boşluk)")
@@ -194,8 +202,10 @@ Module HizliSealant
         lw.WriteLine("")
         lw.WriteLine("Parça çiftleri (sealant alanı):")
         For Each kv As KeyValuePair(Of String, Accum) In pairAcc
-            lw.WriteLine("   " & kv.Key & " : " & F1(kv.Value.W) & " " & u & "²   CG (" & F1(kv.Value.CG(0)) & ", " & _
-                         F1(kv.Value.CG(1)) & ", " & F1(kv.Value.CG(2)) & ")")
+            Dim pm2 As Double = kv.Value.W * If(isInch, 0.00064516, 0.000001)
+            lw.WriteLine("   " & kv.Key & " : " & F1(kv.Value.W) & " " & u & "²" & _
+                         If(SEAL_KG_M2 > 0, "  (" & (pm2 * SEAL_KG_M2).ToString("N3") & " kg)", "") & _
+                         "   CG (" & F1(kv.Value.CG(0)) & ", " & F1(kv.Value.CG(1)) & ", " & F1(kv.Value.CG(2)) & ")")
         Next
         lw.WriteLine("")
         If interfCount > 0 Then lw.WriteLine("Not: " & interfCount.ToString() & " noktada parçalar iç içe (girişim) bulundu, sealant'a dahil edilmedi.")

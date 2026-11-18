@@ -31,6 +31,7 @@ Module HizliDisYuzey
     Dim MIN_BODY_SIZE As Double = 60.0     ' Bundan küçük gövdeleri atla       - sorulur
     Dim NORMAL_ANGLE_DEG As Double = 30.0  ' Sealant: yüzlerin paralellik toleransı (derece)
     Dim SKIP_HIDDEN As Boolean = True      ' Gizli (Hide) bileşenleri atla
+    Dim PAINT_KG_M2 As Double = 0.0        ' Boya katsayısı (kg/m²)            - sorulur
     Dim CREATE_CG_POINTS As Boolean = False ' True: CG noktalarını modelde nokta olarak oluştur
     Dim SKIP_KEYWORDS() As String = {"civata", "cıvata", "bolt", "screw", "vida", "somun", "washer", "rondela", _
                                      "percin", "perçin", "rivet", "din912", "din933", "din931", "din934", "din125", _
@@ -117,6 +118,7 @@ Module HizliDisYuzey
         End If
 
         OUT_SPACING = AskNum("DIŞ YÜZEY tarama aralığı (" & u & ")." & vbCrLf & "2.5 m yapı için 15-30 önerilir.", "Dış Yüzey Aralığı", OUT_SPACING)
+        PAINT_KG_M2 = AskNum("BOYA katsayısı (kg/m²)." & vbCrLf & "Dış yüzey alanı (m²) x bu katsayı = boya ağırlığı. 0 = hesaplama.", "Boya Katsayısı", PAINT_KG_M2)
         MIN_BODY_SIZE = AskNum("En büyük boyutu bundan KÜÇÜK gövdeler atlansın (" & u & "). 0 = kapalı.", "Küçük Parça Filtresi", MIN_BODY_SIZE)
         If OUT_SPACING <= 0 Then OUT_SPACING = If(isInch, 0.8, 20.0)
         If SEAL_SPACING <= 0 Then SEAL_SPACING = If(isInch, 0.2, 5.0)
@@ -187,6 +189,12 @@ Module HizliDisYuzey
         lw.WriteLine("DIŞ YÜZEY")
         lw.WriteLine("   Toplam alan      : " & F1(outAcc.W) & " " & u & "²")
         lw.WriteLine("   Ağırlık merkezi  : X = " & F2(outAcc.CG(0)) & "   Y = " & F2(outAcc.CG(1)) & "   Z = " & F2(outAcc.CG(2)))
+        Dim outM2 As Double = outAcc.W * If(isInch, 0.00064516, 0.000001)
+        lw.WriteLine("   Toplam alan (m²) : " & outM2.ToString("N4") & " m²")
+        If PAINT_KG_M2 > 0 Then
+            lw.WriteLine("   Boya katsayısı   : " & PAINT_KG_M2.ToString("N4") & " kg/m²")
+            lw.WriteLine("   BOYA AĞIRLIĞI    : " & (outM2 * PAINT_KG_M2).ToString("N3") & " kg")
+        End If
         lw.WriteLine("")
         If badRays > 0 Then lw.WriteLine("Not: " & badRays.ToString() & " ışın, kenar/teğet geçiş nedeniyle güvenilmez bulunup atlandı.")
         lw.WriteLine("Toplam süre: " & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk")
