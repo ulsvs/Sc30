@@ -31,6 +31,13 @@ Module SadeceDisYuzeyAnalizi
     Dim MAX_N_FINE As Integer = 20         ' İnce taramada yön başına max nokta
     Dim EPS As Double = 0.02               ' Işın başlangıç ofseti (mm)
     Dim HIGHLIGHT_RESULTS As Boolean = True
+    Dim MIN_BODY_SIZE As Double = 0.0      ' En büyük boyutu bundan küçük gövdeler atlanır (mm, 0 = kapalı) - sorulur
+    Dim MIN_FACE_SIZE As Double = 3.0      ' Köşegeni bundan küçük yüzler (küçük pah/radyüs) atlanır (mm)
+    Dim SKIP_HIDDEN As Boolean = True      ' Gizlenmiş (Hide) bileşenleri atla
+    ' Adında bunlardan biri geçen bileşenler BAĞLAYICI sayılıp atlanır (küçük harf, istediğiniz gibi düzenleyin)
+    Dim SKIP_KEYWORDS() As String = {"civata", "cıvata", "bolt", "screw", "vida", "somun", "washer", "rondela", _
+                                     "percin", "perçin", "rivet", "din912", "din933", "din931", "din934", "din125", _
+                                     "din7991", "iso4762", "iso4017", "iso4014", "iso4032", "iso7089", "iso10642"}
     ' -----------------------------------------------------------------------
 
     Dim theSession As Session = Session.GetSession()
@@ -99,7 +106,13 @@ Module SadeceDisYuzeyAnalizi
                           "Küçük = hassas ama yavaş. 2-3 m'lik yapı için 50 önerilir.", "Örnek Aralığı", SAMPLE_STEP)
         Catch ex As Exception
         End Try
+        Try
+            MIN_BODY_SIZE = NXInputBox.GetInputNumber("En büyük boyutu bu değerden KÜÇÜK gövdeler atlansın (" & u & ")." & vbCrLf & _
+                          "Cıvata/somun/pul gibi küçük parçaları elemek için. 0 = kapalı. Örn: 60", "Küçük Parça Filtresi", 0.0)
+        Catch ex As Exception
+        End Try
         If SAMPLE_STEP <= 0 Then SAMPLE_STEP = If(isInch, 2.0, 50.0)
+        If isInch Then MIN_FACE_SIZE = MIN_FACE_SIZE / 25.4
         ufs.Mtx4.Identity(identityMtx)
         Try
             areaUnit = dispPart.UnitCollection.GetBase("Area")
@@ -116,15 +129,49 @@ Module SadeceDisYuzeyAnalizi
             Return
         End If
 
+        ' ---- Bağlayıcı / küçük parça filtresi ----
+        Dim kept As New List(Of Body)
+        Dim skippedNames As New SortedDictionary(Of String, Integer)
+        For Each b As Body In bodies
+            Dim why As String = SkipReason(b)
+            If why Is Nothing Then
+                kept.Add(b)
+            Else
+                If skippedNames.ContainsKey(why) Then skippedNames(why) += 1 Else skippedNames.Add(why, 1)
+            End If
+        Next
+        lw.WriteLine("Atlanan gövdeler (" & (bodies.Count - kept.Count).ToString() & "):")
+        For Each kv As KeyValuePair(Of String, Integer) In skippedNames
+            lw.WriteLine("  - " & kv.Key & "  x" & kv.Value.ToString())
+        Next
+        lw.WriteLine("")
+        bodies = kept
+        If bodies.Count = 0 Then
+            theUI.NXMessageBox.Show("Dış Yüzey", NXMessageBox.DialogType.Error, "Filtreden sonra gövde kalmadı.")
+            Return
+        End If
+
         Dim sw As Stopwatch = Stopwatch.StartNew()
         Dim faces As New List(Of FaceInfo)
         Dim tagList As New List(Of Tag)
+        Dim smallFaces As Integer = 0
         For Each b As Body In bodies
             tagList.Add(b.Tag)
             Dim cName As String = If(b.IsOccurrence AndAlso b.OwningComponent IsNot Nothing, b.OwningComponent.DisplayName, dispPart.Leaf)
             Dim idx As Integer = 0
             For Each f As Face In b.GetFaces()
                 idx += 1
+                If MIN_FACE_SIZE > 0 Then
+                    Dim fb(5) As Double
+                    Try
+                        ufs.Modl.AskBoundingBox(f.Tag, fb)
+                        If VLen(New Double() {fb(3) - fb(0), fb(4) - fb(1), fb(5) - fb(2)}) < MIN_FACE_SIZE Then
+                            smallFaces += 1
+                            Continue For
+                        End If
+                    Catch ex As Exception
+                    End Try
+                End If
                 Dim fi As New FaceInfo()
                 fi.Face = f : fi.BodyTag = b.Tag : fi.CompName = cName
                 fi.BodyName = b.JournalIdentifier : fi.Index = idx
@@ -136,6 +183,7 @@ Module SadeceDisYuzeyAnalizi
         lw.WriteLine("==================== DIŞ YÜZEY ANALİZİ ====================")
         lw.WriteLine("Montaj        : " & dispPart.Leaf)
         lw.WriteLine("Gövde / Yüz   : " & bodies.Count.ToString() & " / " & faces.Count.ToString())
+        lw.WriteLine("Atlanan küçük yüz (pah/radyüs < " & MIN_FACE_SIZE.ToString("0.##") & " " & u & "): " & smallFaces.ToString())
         lw.WriteLine("Örnek aralığı : " & SAMPLE_STEP.ToString() & " " & u)
         lw.WriteLine("")
 
@@ -145,8 +193,11 @@ Module SadeceDisYuzeyAnalizi
         For k As Integer = 0 To faces.Count - 1
             Dim fi As FaceInfo = faces(k)
             If k Mod 20 = 0 Then Status("Dış yüzey analizi: " & (k + 1).ToString() & " / " & faces.Count.ToString())
-            If k Mod 200 = 0 Then lw.WriteLine("  ... yüz " & (k + 1).ToString() & " / " & faces.Count.ToString() & _
-                                                "  (" & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk)")
+            If k Mod 200 = 0 AndAlso k > 0 Then
+                Dim remain As Double = sw.Elapsed.TotalMinutes / k * (faces.Count - k)
+                lw.WriteLine("  ... yüz " & k.ToString() & " / " & faces.Count.ToString() & _
+                             "  geçen: " & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk, tahmini kalan: " & remain.ToString("0") & " dk")
+            End If
             Try
                 ' Kaba tarama
                 Dim samples As List(Of Sample) = SampleFace(fi, SAMPLE_STEP * COARSE_FACTOR, MAX_N_COARSE)
@@ -271,6 +322,37 @@ Module SadeceDisYuzeyAnalizi
             Next
         End If
         Return list
+    End Function
+
+    ' Gövde atlanacaksa nedenini (bileşen adı + neden) döndürür, atlanmayacaksa Nothing
+    Function SkipReason(b As Body) As String
+        Dim cName As String = ""
+        Dim comp As Component = Nothing
+        If b.IsOccurrence Then comp = b.OwningComponent
+        If comp IsNot Nothing Then
+            cName = comp.DisplayName
+            If SKIP_HIDDEN Then
+                Dim c As Component = comp
+                While c IsNot Nothing
+                    If c.IsBlanked Then Return cName & "  [gizli]"
+                    c = c.Parent
+                End While
+            End If
+            Dim low As String = cName.ToLowerInvariant()
+            For Each kw As String In SKIP_KEYWORDS
+                If low.Contains(kw) Then Return cName & "  [bağlayıcı: " & kw & "]"
+            Next
+        End If
+        If MIN_BODY_SIZE > 0 Then
+            Dim bb(5) As Double
+            Try
+                ufs.Modl.AskBoundingBox(b.Tag, bb)
+                Dim mx As Double = Math.Max(bb(3) - bb(0), Math.Max(bb(4) - bb(1), bb(5) - bb(2)))
+                If mx < MIN_BODY_SIZE Then Return If(cName = "", b.JournalIdentifier, cName) & "  [küçük: " & Fmt(mx) & "]"
+            Catch ex As Exception
+            End Try
+        End If
+        Return Nothing
     End Function
 
     Function CollectAllBodies(p As Part) As List(Of Body)
