@@ -111,6 +111,19 @@ Module DisYuzeyVeTemasAnalizi
 
     ' ===================================== MAIN =======================================
     Sub Main(ByVal args() As String)
+        Try
+            RunAnalysis()
+        Catch ex As Exception
+            lw.Open()
+            lw.WriteLine("")
+            lw.WriteLine("!!!!!!!!!!!!!!!!!!!! BEKLENMEYEN HATA !!!!!!!!!!!!!!!!!!!!")
+            lw.WriteLine(ex.ToString())
+            theUI.NXMessageBox.Show("Yüzey Analizi", NXMessageBox.DialogType.Error, _
+                "Analiz bir hata ile durdu:" & vbCrLf & ex.Message & vbCrLf & vbCrLf & "Ayrıntı Info penceresinde.")
+        End Try
+    End Sub
+
+    Sub RunAnalysis()
         dispPart = theSession.Parts.Display
         If dispPart Is Nothing Then
             theUI.NXMessageBox.Show("Yüzey Analizi", NXMessageBox.DialogType.Error, "Açık bir montaj (display part) yok.")
@@ -220,10 +233,14 @@ Module DisYuzeyVeTemasAnalizi
         Dim contactRows As New List(Of ContactRow)
         Dim skipped As Integer = 0
         Dim internalCount As Integer = 0
+        Dim errorCount As Integer = 0
 
         For k As Integer = 0 To allFaces.Count - 1
             Dim fi As FaceInfo = allFaces(k)
             If k Mod 20 = 0 Then Status("Yüzeyler analiz ediliyor: " & (k + 1).ToString() & " / " & allFaces.Count.ToString())
+            If k Mod 200 = 0 Then lw.WriteLine("  ... yüz " & (k + 1).ToString() & " / " & allFaces.Count.ToString() & _
+                                                "  (" & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk)")
+            Try
 
             Dim samples As List(Of Sample) = SampleFace(fi, GRID_N)
             If samples.Count = 0 Then
@@ -253,6 +270,8 @@ Module DisYuzeyVeTemasAnalizi
                     Dim nb() As Double = NormalAt(fb, q)
                     If nb Is Nothing Then Continue For
                     If Dot(s.N, nb) > -COS_LIM Then Continue For    ' yüzler birbirine bakmıyor
+                    ' Arada başka bir parça/ince sac varsa (tolerans > sac kalınlığı durumu) bu temas değildir
+                    If d > EPS * 4 AndAlso IsOccluded(s, q, d) Then Continue For
                     If d < bestD Then
                         bestD = d : best = fb
                     End If
@@ -303,6 +322,13 @@ Module DisYuzeyVeTemasAnalizi
                 r.MinGap = acc.MinGap : r.MaxGap = acc.MaxGap
                 contactRows.Add(r)
             Next
+            Catch ex As Exception
+                errorCount += 1
+                If errorCount <= 50 Then
+                    lw.WriteLine("  HATA (atlandı): " & fi.Owner.CompName & " / " & fi.Owner.BodyName & " / " & _
+                                 fi.Label & " -> " & ex.Message)
+                End If
+            End Try
         Next
 
         ' ---- 3. AŞAMA: Rapor ----
@@ -337,6 +363,7 @@ Module DisYuzeyVeTemasAnalizi
         lw.WriteLine("Toplam temas alanı     : " & Fmt(totalContact) & " " & u & "²  (her iki taraf ayrı sayılır)")
         lw.WriteLine("İç (raporlanmayan) yüz : " & internalCount.ToString())
         lw.WriteLine("Örneklenemeyen yüz     : " & skipped.ToString())
+        lw.WriteLine("Hata nedeniyle atlanan : " & errorCount.ToString())
         lw.WriteLine("")
 
         ' Parça çiftleri bazında temas toplamı
@@ -495,7 +522,7 @@ Module DisYuzeyVeTemasAnalizi
             End Try
             If st = 1 Then fi.Flip = True : Return
             If st = 2 Then fi.Flip = False : Return
-            e *= 10   ' sınırda kaldı, biraz daha uzaklaş
+            e *= 3    ' sınırda kaldı, biraz uzaklaş (ince duvarı delmeyecek kadar)
         Next
     End Sub
 
@@ -544,6 +571,31 @@ Module DisYuzeyVeTemasAnalizi
                 Continue For
             End Try
             If nRes = 0 Then Return True
+        Next
+        Return False
+    End Function
+
+    ' Örnek noktadan karşı yüzdeki noktaya giden yolda BAŞKA bir gövde var mı?
+    ' (Boşluk toleransı sac/duvar kalınlığından büyük olduğunda arkadaki parçanın
+    '  yanlışlıkla temas sayılmasını engeller.)
+    Function IsOccluded(s As Sample, q() As Double, d As Double) As Boolean
+        Dim origin() As Double = Add(s.P, Scale(s.N, EPS))
+        Dim v() As Double = Subtract(q, origin)
+        Dim dist As Double = VLen(v)
+        If dist < EPS * 2 Then Return False
+        Dim dirv() As Double = Scale(v, 1.0 / dist)
+        Dim nRes As Integer = 0
+        Dim hits() As UFModl.RayHitPointInfo = Nothing
+        Try
+            ufs.Modl.TraceARay(allBodyTags.Length, allBodyTags, origin, dirv, identityMtx, 5, nRes, hits)
+        Catch ex As Exception
+            Return False
+        End Try
+        If nRes = 0 OrElse hits Is Nothing Then Return False
+        For h As Integer = 0 To Math.Min(nRes, hits.Length) - 1
+            Dim hd As Double = VLen(Subtract(hits(h).hit_point, origin))
+            ' Karşı yüze ulaşmadan (belirgin şekilde önce) bir çarpma varsa -> arada engel var
+            If hd < dist - Math.Max(EPS * 2, 0.1 * d) Then Return True
         Next
         Return False
     End Function
