@@ -239,23 +239,34 @@ Module HizliDisYuzey
         Dim done As Long = 0
         Dim sw As Stopwatch = Stopwatch.StartNew()
 
-        ' --- Z ışınları: hacim haritası ---
+        ' --- 3 eksende ışın at, hacim haritasını HER ÜÇ eksenden doldur ---
+        ' (İnce saclar ızgara aralığından ince olsa bile en az bir eksen onları keser;
+        '  böylece dış hava ince duvarlardan içeri "sızmaz".)
         Dim zHits(gn(0) * gn(1) - 1) As List(Of Hit)
+        Dim xHits(gn(1) * gn(2) - 1) As List(Of Hit)
+        Dim yHits(gn(0) * gn(2) - 1) As List(Of Hit)
         For i As Integer = 0 To gn(0) - 1
             For j As Integer = 0 To gn(1) - 1
-                Dim hits As List(Of Hit) = CastLine(2, Ctr(0, i) + jit(0), Ctr(1, j) + jit(1), Nothing)
-                zHits(i + gn(0) * j) = hits
-                For k As Integer = 0 To hits.Count - 2
-                    If hits(k).InsAfter > 0 Then
-                        Dim kA As Integer = Math.Max(0, CInt(Math.Ceiling((hits(k).T - g0(2)) / VH(2) - 0.5)))
-                        Dim kB As Integer = Math.Min(gn(2) - 1, CInt(Math.Floor((hits(k + 1).T - g0(2)) / VH(2) - 0.5)))
-                        For kk As Integer = kA To kB
-                            vox(VIdx(i, j, kk)) = 1
-                        Next
-                    End If
-                Next
+                zHits(i + gn(0) * j) = CastLine(2, Ctr(0, i) + jit(0), Ctr(1, j) + jit(1), Nothing)
+                MarkSolid(zHits(i + gn(0) * j), 2, i, j)
                 done += 1
-                Progress("Dış yüzey (hacim haritası)", done, nRays, sw)
+                Progress("Dış yüzey (Z ışınları)", done, nRays, sw)
+            Next
+        Next
+        For j As Integer = 0 To gn(1) - 1
+            For k As Integer = 0 To gn(2) - 1
+                xHits(j + gn(1) * k) = CastLine(0, Ctr(1, j) + jit(1), Ctr(2, k) + jit(2), Nothing)
+                MarkSolid(xHits(j + gn(1) * k), 0, j, k)
+                done += 1
+                Progress("Dış yüzey (X ışınları)", done, nRays, sw)
+            Next
+        Next
+        For i As Integer = 0 To gn(0) - 1
+            For k As Integer = 0 To gn(2) - 1
+                yHits(i + gn(0) * k) = CastLine(1, Ctr(0, i) + jit(0), Ctr(2, k) + jit(2), Nothing)
+                MarkSolid(yHits(i + gn(0) * k), 1, i, k)
+                done += 1
+                Progress("Dış yüzey (Y ışınları)", done, nRays, sw)
             Next
         Next
 
@@ -276,28 +287,38 @@ Module HizliDisYuzey
             If k < nz - 1 Then Flood(v + nx * ny, q)
         End While
 
-        ' --- Dış yüzey noktaları: Z (kayıtlı), X ve Y ışınları ---
+        ' --- Dış yüzey noktaları ---
         For i As Integer = 0 To gn(0) - 1
             For j As Integer = 0 To gn(1) - 1
                 ProcessOuter(zHits(i + gn(0) * j), 2, i, j)
             Next
         Next
-        zHits = Nothing
         For j As Integer = 0 To gn(1) - 1
             For k As Integer = 0 To gn(2) - 1
-                ProcessOuter(CastLine(0, Ctr(1, j) + jit(1), Ctr(2, k) + jit(2), Nothing), 0, j, k)
-                done += 1
-                Progress("Dış yüzey (X ışınları)", done, nRays, sw)
+                ProcessOuter(xHits(j + gn(1) * k), 0, j, k)
             Next
         Next
         For i As Integer = 0 To gn(0) - 1
             For k As Integer = 0 To gn(2) - 1
-                ProcessOuter(CastLine(1, Ctr(0, i) + jit(0), Ctr(2, k) + jit(2), Nothing), 1, i, k)
-                done += 1
-                Progress("Dış yüzey (Y ışınları)", done, nRays, sw)
+                ProcessOuter(yHits(i + gn(0) * k), 1, i, k)
             Next
         Next
+        zHits = Nothing : xHits = Nothing : yHits = Nothing
         vox = Nothing
+    End Sub
+
+    ' Işın üzerindeki dolu aralıkların DOKUNDUĞU tüm voxelleri dolu işaretle (merkez değil, kapsam)
+    Sub MarkSolid(hits As List(Of Hit), ax As Integer, i1 As Integer, i2 As Integer)
+        If hits Is Nothing Then Return
+        For k As Integer = 0 To hits.Count - 2
+            If hits(k).InsAfter > 0 Then
+                Dim lo As Integer = Math.Max(0, CInt(Math.Floor((hits(k).T - g0(ax)) / VH(ax))))
+                Dim hi As Integer = Math.Min(gn(ax) - 1, CInt(Math.Floor((hits(k + 1).T - g0(ax)) / VH(ax))))
+                For ia As Integer = lo To hi
+                    vox(VIdxAxis(ax, ia, i1, i2)) = 1
+                Next
+            End If
+        Next
     End Sub
 
     Sub Flood(v As Integer, q As Queue(Of Integer))
