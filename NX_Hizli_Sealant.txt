@@ -281,6 +281,10 @@ Module HizliSealant
             nRays += lines(ax).Count
         Next
         lw.WriteLine("Sealant: atılacak ışın sayısı = " & nRays.ToString())
+        If nRays = 0 Then
+            lw.WriteLine("UYARI: Sealant tarama aralığı birleşim bölgelerine göre çok büyük, hiç ışın düşmedi. Aralığı küçültün (örn. 5).")
+            Return
+        End If
 
         ' 3) Işınları at ve üst üste gelen yüzeyleri topla
         Dim done As Long = 0

@@ -55,7 +55,7 @@ Module HizliDisYuzey
     Dim COS_LIM As Double
 
     ' voxel ızgarası
-    Dim VOX_H As Double
+    Dim VH(2) As Double   ' eksen bazında voxel / ışın aralığı
     Dim g0(2) As Double
     Dim gn(2) As Integer
     Dim vox() As Byte   ' 0 = hava, 1 = dolu, 2 = dış hava
@@ -216,20 +216,24 @@ Module HizliDisYuzey
 
     ' ================================ DIŞ YÜZEY GEÇİŞİ ================================
     Sub OuterPass(u As String)
-        VOX_H = OUT_SPACING
+        ' Her eksende en az ~10 ışın hattı olsun (ince parçalarda büyük aralık ışınları kaçırmasın)
+        For c As Integer = 0 To 2
+            VH(c) = Math.Min(OUT_SPACING, Math.Max((bbMax(c) - bbMin(c)) / 10.0, MERGE_TOL * 100))
+        Next
         Dim total As Long
         Do
             For c As Integer = 0 To 2
-                g0(c) = bbMin(c) - VOX_H
-                gn(c) = CInt(Math.Ceiling((bbMax(c) + VOX_H - g0(c)) / VOX_H))
+                g0(c) = bbMin(c) - VH(c)
+                gn(c) = CInt(Math.Ceiling((bbMax(c) + VH(c) - g0(c)) / VH(c)))
             Next
             total = CLng(gn(0)) * gn(1) * gn(2)
             If total <= MAX_VOXELS Then Exit Do
-            VOX_H *= 1.25
+            For c As Integer = 0 To 2 : VH(c) *= 1.25 : Next
         Loop
-        If VOX_H > OUT_SPACING Then lw.WriteLine("Uyarı: bellek sınırı için dış yüzey aralığı " & F2(VOX_H) & " " & u & " yapıldı.")
+        lw.WriteLine("Kullanılan tarama aralığı X / Y / Z: " & F2(VH(0)) & " / " & F2(VH(1)) & " / " & F2(VH(2)) & " " & u & _
+                     "   (ızgara " & gn(0).ToString() & " x " & gn(1).ToString() & " x " & gn(2).ToString() & ")")
         vox = New Byte(CInt(total) - 1) {}
-        Dim jit As Double = VOX_H * 0.0173
+        Dim jit() As Double = {VH(0) * 0.0173, VH(1) * 0.0173, VH(2) * 0.0173}
 
         Dim nRays As Long = CLng(gn(0)) * gn(1) + CLng(gn(1)) * gn(2) + CLng(gn(0)) * gn(2)
         Dim done As Long = 0
@@ -239,12 +243,12 @@ Module HizliDisYuzey
         Dim zHits(gn(0) * gn(1) - 1) As List(Of Hit)
         For i As Integer = 0 To gn(0) - 1
             For j As Integer = 0 To gn(1) - 1
-                Dim hits As List(Of Hit) = CastLine(2, Ctr(0, i) + jit, Ctr(1, j) + jit, Nothing)
+                Dim hits As List(Of Hit) = CastLine(2, Ctr(0, i) + jit(0), Ctr(1, j) + jit(1), Nothing)
                 zHits(i + gn(0) * j) = hits
                 For k As Integer = 0 To hits.Count - 2
                     If hits(k).InsAfter > 0 Then
-                        Dim kA As Integer = Math.Max(0, CInt(Math.Ceiling((hits(k).T - g0(2)) / VOX_H - 0.5)))
-                        Dim kB As Integer = Math.Min(gn(2) - 1, CInt(Math.Floor((hits(k + 1).T - g0(2)) / VOX_H - 0.5)))
+                        Dim kA As Integer = Math.Max(0, CInt(Math.Ceiling((hits(k).T - g0(2)) / VH(2) - 0.5)))
+                        Dim kB As Integer = Math.Min(gn(2) - 1, CInt(Math.Floor((hits(k + 1).T - g0(2)) / VH(2) - 0.5)))
                         For kk As Integer = kA To kB
                             vox(VIdx(i, j, kk)) = 1
                         Next
@@ -281,14 +285,14 @@ Module HizliDisYuzey
         zHits = Nothing
         For j As Integer = 0 To gn(1) - 1
             For k As Integer = 0 To gn(2) - 1
-                ProcessOuter(CastLine(0, Ctr(1, j) + jit, Ctr(2, k) + jit, Nothing), 0, j, k)
+                ProcessOuter(CastLine(0, Ctr(1, j) + jit(1), Ctr(2, k) + jit(2), Nothing), 0, j, k)
                 done += 1
                 Progress("Dış yüzey (X ışınları)", done, nRays, sw)
             Next
         Next
         For i As Integer = 0 To gn(0) - 1
             For k As Integer = 0 To gn(2) - 1
-                ProcessOuter(CastLine(1, Ctr(0, i) + jit, Ctr(2, k) + jit, Nothing), 1, i, k)
+                ProcessOuter(CastLine(1, Ctr(0, i) + jit(0), Ctr(2, k) + jit(2), Nothing), 1, i, k)
                 done += 1
                 Progress("Dış yüzey (Y ışınları)", done, nRays, sw)
             Next
@@ -304,7 +308,7 @@ Module HizliDisYuzey
     End Sub
 
     Function Ctr(c As Integer, i As Integer) As Double
-        Return g0(c) + (i + 0.5) * VOX_H
+        Return g0(c) + (i + 0.5) * VH(c)
     End Function
 
     Function VIdx(i As Integer, j As Integer, k As Integer) As Integer
@@ -326,7 +330,7 @@ Module HizliDisYuzey
             If DomAxis(hk.Nrm) <> ax Then Continue For
             Dim seg As Integer = If(hk.IsEntry, k, k + 1)
             If SegExterior(hits, seg, ax, i1, i2) Then
-                outAcc.AddPt(hk.P, VOX_H * VOX_H / Math.Abs(hk.Nrm(ax)))
+                outAcc.AddPt(hk.P, VH(If(ax = 0, 1, 0)) * VH(If(ax = 2, 1, 2)) / Math.Abs(hk.Nrm(ax)))
             End If
         Next
     End Sub
@@ -337,8 +341,8 @@ Module HizliDisYuzey
         If seg = 0 Then Return True
         If hits(seg - 1).InsAfter > 0 Then Return False
         If seg = m Then Return True
-        Dim segLo As Integer = Math.Max(0, CInt(Math.Ceiling((hits(seg - 1).T - g0(ax)) / VOX_H - 0.5)))
-        Dim segHi As Integer = Math.Min(gn(ax) - 1, CInt(Math.Floor((hits(seg).T - g0(ax)) / VOX_H - 0.5)))
+        Dim segLo As Integer = Math.Max(0, CInt(Math.Ceiling((hits(seg - 1).T - g0(ax)) / VH(ax) - 0.5)))
+        Dim segHi As Integer = Math.Min(gn(ax) - 1, CInt(Math.Floor((hits(seg).T - g0(ax)) / VH(ax) - 0.5)))
         For ia As Integer = segLo To segHi
             If vox(VIdxAxis(ax, ia, i1, i2)) = 2 Then Return True
         Next
