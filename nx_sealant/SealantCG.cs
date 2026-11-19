@@ -65,6 +65,15 @@ public class Settings
     public bool CreateCgPoint = true;    // CG'ye "SEALANT_CG" isimli nokta koy
     public bool WriteCsv = true;         // parça çifti bazında CSV raporu (%TEMP%)
     public bool PrePruneWithNxBox = true;// faceting öncesi NX bounding box ile eleme
+
+    // --- NX'te gösterim ------------------------------------------------------------------
+    // Sealant atılan bölgeler, boşluğun orta düzleminde renkli facet nesneleri olarak montaj
+    // (work) part'ına eklenir: her parça çifti ayrı renk, adı SEALANT_001, SEALANT_002 ...
+    // Component part'lar DEĞİŞTİRİLMEZ. Makro tekrar çalışınca eski SEALANT_* nesneleri silinir.
+    public bool ShowInNx = true;
+    public int DisplayLayer = 251;            // sealant nesnelerinin layer'ı (aç/kapa için)
+    public int MaxDisplayTriangles = 3000000; // bundan fazlaysa NX'te çizilmez, sadece STL yazılır
+    public bool WriteStl = true;              // sealant bölgelerini STL olarak da kaydet (%TEMP%)
 }
 
 // ------------------------------------------------------------------------------------
@@ -224,6 +233,12 @@ public sealed class SealantResult
     public Dictionary<long, Acc> Pairs = new Dictionary<long, Acc>();   // (A<<32)|B
     public double DensityGcm3;
     public int Bodies, ActiveBodies, Triangles, CandidateTriangles;
+    /// Gösterim üçgenleri (mm, boşluğun orta düzleminde), parça çifti anahtarı ile: her üçgen 9 float
+    public Dictionary<long, List<float>> Display = new Dictionary<long, List<float>>();
+    public long DisplayTriangleCount()
+    {
+        long n = 0; foreach (var kv in Display) n += kv.Value.Count / 9; return n;
+    }
     public double MassKg { get { return Total.Vol * DensityGcm3 * 1e-6; } }  // mm3 * g/cm3 -> kg
     /// CG etrafında atalet (kg*mm2): Ixx, Iyy, Izz, Ixy, Ixz, Iyz  (Ixy = -∫xy dm konvansiyonu)
     public double[] InertiaAtCg()
@@ -342,6 +357,11 @@ public static class SealantSolver
                         Acc a; if (!res.Pairs.TryGetValue(kv.Key, out a)) { a = new Acc(); res.Pairs[kv.Key] = a; }
                         a.Merge(kv.Value);
                     }
+                    foreach (var kv in w.Disp)
+                    {
+                        List<float> d; if (!res.Display.TryGetValue(kv.Key, out d)) { d = new List<float>(); res.Display[kv.Key] = d; }
+                        d.AddRange(kv.Value);
+                    }
                 }
             });
         return res;
@@ -355,7 +375,11 @@ public static class SealantSolver
         public List<int> Hits = new List<int>();
         public List<int> Excl = new List<int>();
         public List<BodyInfo> Ko = new List<BodyInfo>();
+        public Dictionary<long, List<float>> Disp = new Dictionary<long, List<float>>();
+        public List<Hit> Pend = new List<Hit>();
     }
+
+    struct Hit { public int I, J; public bool Down; public double Gap; public int B; }
 
     static void ProcessTriangle(int t, TriSoup s, BodyRole[] role, Grid grid, Grid exGrid, List<BodyInfo> keepOuts,
                                 Settings cfg, double cosTol, double margin, Worker w)
@@ -401,44 +425,82 @@ public static class SealantSolver
         double area = 0.5 * V3.Cross(b - a, c - a).Len();
         double dA = area / ((double)m * m);
         V3 e1 = (b - a) * (1.0 / m), e2 = (c - a) * (1.0 / m);
+        bool show = cfg.ShowInNx || cfg.WriteStl;
+        int ok = 0, firstB = -1; bool sameB = true; double sumGap = 0;
+        w.Pend.Clear();
         for (int i = 0; i < m; i++)
             for (int j = 0; j < m - i; j++)
             {
-                Sample(a + e1 * (i + 1.0 / 3) + e2 * (j + 1.0 / 3), n, dA, A, s, role, cfg, margin, w);   // "yukarı" üçgen
-                if (i + j < m - 1)
-                    Sample(a + e1 * (i + 2.0 / 3) + e2 * (j + 2.0 / 3), n, dA, A, s, role, cfg, margin, w); // "aşağı" üçgen
+                for (int down = 0; down < 2; down++)
+                {
+                    if (down == 1 && i + j >= m - 1) break;
+                    double f = down == 0 ? 1.0 / 3 : 2.0 / 3;     // "yukarı" / "aşağı" alt üçgen merkezi
+                    double gap; int hb;
+                    if (!Sample(a + e1 * (i + f) + e2 * (j + f), n, dA, A, s, role, cfg, margin, w, out gap, out hb)) continue;
+                    ok++; sumGap += gap;
+                    if (firstB < 0) firstB = hb; else if (hb != firstB) sameB = false;
+                    if (show) { Hit h; h.I = i; h.J = j; h.Down = down == 1; h.Gap = gap; h.B = hb; w.Pend.Add(h); }
+                }
             }
+        if (!show || ok == 0) return;
+
+        // Gösterim: üçgenin tamamı aynı çifte sealant alıyorsa tek üçgen (ortalama boşluk), değilse
+        // sadece sealant alan alt üçgenler. Hepsi boşluğun orta düzlemine ötelenir.
+        if (ok == m * m && sameB)
+        {
+            V3 off = n * (0.5 * sumGap / ok);
+            EmitTri(w, Key(A, firstB), a + off, b + off, c + off);
+            return;
+        }
+        foreach (Hit h in w.Pend)
+        {
+            V3 off = n * (0.5 * h.Gap), p0 = a + e1 * h.I + e2 * h.J + off;
+            if (!h.Down) EmitTri(w, Key(A, h.B), p0, p0 + e1, p0 + e2);
+            else EmitTri(w, Key(A, h.B), p0 + e1, p0 + e1 + e2, p0 + e2);
+        }
     }
 
-    static void Sample(V3 p, V3 n, double dA, int A, TriSoup s, BodyRole[] role, Settings cfg, double margin, Worker w)
+    static long Key(int a, int b) { return ((long)a << 32) | (uint)b; }
+
+    static void EmitTri(Worker w, long key, V3 a, V3 b, V3 c)
+    {
+        List<float> d; if (!w.Disp.TryGetValue(key, out d)) { d = new List<float>(); w.Disp[key] = d; }
+        d.Add((float)a.X); d.Add((float)a.Y); d.Add((float)a.Z); d.Add((float)b.X); d.Add((float)b.Y); d.Add((float)b.Z);
+        d.Add((float)c.X); d.Add((float)c.Y); d.Add((float)c.Z);
+    }
+
+    static bool Sample(V3 p, V3 n, double dA, int A, TriSoup s, BodyRole[] role, Settings cfg, double margin, Worker w,
+                       out double gap, out int bestBody)
     {
         V3 o = p - n * Eps;
-        double best = double.MaxValue; int bestBody = -1;
+        gap = 0;
+        double best = double.MaxValue; bestBody = -1;
         foreach (int k in w.Hits)
         {
             double t;
             if (RayTri(o, n, s.A(k), s.B(k), s.C(k), out t) && t >= 0 && t < best) { best = t; bestBody = s.Body[k]; }
         }
-        if (bestBody < 0) return;
-        double gap = best - Eps;
-        if (gap > cfg.MaxGap) return;            // açıklık çok büyük
-        if (gap < cfg.MinGap) return;            // temas: sealant yok
-        if (bestBody < A) return;                // çift sayımı önle: hacmi küçük indeksli gövde sayar
-        if (role[bestBody] != BodyRole.Normal) return;   // menteşe/cıvata ile arasındaki boşluk
+        if (bestBody < 0) return false;
+        gap = best - Eps;
+        if (gap > cfg.MaxGap) return false;            // açıklık çok büyük
+        if (gap < cfg.MinGap) return false;            // temas: sealant yok
+        if (bestBody < A) return false;                // çift sayımı önle: hacmi küçük indeksli gövde sayar
+        if (role[bestBody] != BodyRole.Normal) return false;   // menteşe/cıvata ile arasındaki boşluk
 
         V3 mid = p + n * (0.5 * gap);
         if (w.Excl.Count > 0)
         {
             double m2 = margin * margin;
-            foreach (int k in w.Excl) if (DistSq(mid, s.A(k), s.B(k), s.C(k)) < m2) return;
+            foreach (int k in w.Excl) if (DistSq(mid, s.A(k), s.B(k), s.C(k)) < m2) return false;
         }
-        foreach (BodyInfo K in w.Ko) if (Inside(mid, K, s)) return;
+        foreach (BodyInfo K in w.Ko) if (Inside(mid, K, s)) return false;
 
         double dV = dA * gap;
         w.Total.AddPoint(dA, dV, mid);
-        long key = ((long)A << 32) | (uint)bestBody;
+        long key = Key(A, bestBody);
         Acc pa; if (!w.Pairs.TryGetValue(key, out pa)) { pa = new Acc(); w.Pairs[key] = pa; }
         pa.AddPoint(dA, dV, mid);
+        return true;
     }
 
     // ---- geometri yardımcıları -----------------------------------------------------------
@@ -564,6 +626,31 @@ public static class Report
         return sb.ToString();
     }
 
+    /// Gösterim üçgenlerini binary STL olarak yazar (birim: mm)
+    public static void WriteStl(string path, SealantResult r)
+    {
+        long n = r.DisplayTriangleCount();
+        using (var bw = new BinaryWriter(File.Create(path)))
+        {
+            byte[] header = new byte[80];
+            byte[] txt = Encoding.ASCII.GetBytes("SealantCG sealant regions, units mm");
+            Array.Copy(txt, header, txt.Length);
+            bw.Write(header); bw.Write((uint)n);
+            foreach (var kv in r.Display)
+            {
+                List<float> d = kv.Value;
+                for (int i = 0; i + 8 < d.Count; i += 9)
+                {
+                    V3 a = new V3(d[i], d[i + 1], d[i + 2]), b = new V3(d[i + 3], d[i + 4], d[i + 5]), c = new V3(d[i + 6], d[i + 7], d[i + 8]);
+                    V3 nn = V3.Cross(b - a, c - a).Unit();
+                    bw.Write((float)nn.X); bw.Write((float)nn.Y); bw.Write((float)nn.Z);
+                    for (int k = 0; k < 9; k++) bw.Write(d[i + k]);
+                    bw.Write((ushort)0);
+                }
+            }
+        }
+    }
+
     /// Türkçe karakterleri ASCII'ye çevirip büyük harf yapar (kültürden bağımsız eşleşme)
     public static string Norm(string s)
     {
@@ -619,6 +706,8 @@ public class SealantCG
         if (work == null || disp == null || work.Tag != disp.Tag)
         { lw.WriteLine("Montajı açıp hem Displayed hem Work part yapın, sonra tekrar çalıştırın."); return; }
         double workToMm = work.PartUnits == BasePart.Units.Inches ? 25.4 : 1.0;
+        int removed = DeletePrevious(work);
+        if (removed > 0) lw.WriteLine(string.Format("Önceki çalıştırmadan {0} SEALANT_* nesnesi silindi", removed));
 
         // ---- Kullanıcı seçimi ile ek hariç tutma ---------------------------------------
         var exclComps = new HashSet<Tag>(); var exclBodies = new HashSet<Tag>();
@@ -711,7 +800,101 @@ public class SealantCG
             }
             catch (Exception ex) { lw.WriteLine("CG noktası oluşturulamadı: " + ex.Message); }
         }
+        string stamp = SafeName(work.Leaf) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        long nDisp = r.DisplayTriangleCount();
+        if (cfg.WriteStl && nDisp > 0)
+        {
+            try
+            {
+                string stl = Path.Combine(Path.GetTempPath(), "sealant_" + stamp + ".stl");
+                Report.WriteStl(stl, r);
+                lw.WriteLine("STL (mm): " + stl + "   -> gerekirse File > Import > STL ile açılabilir");
+            }
+            catch (Exception ex) { lw.WriteLine("STL yazılamadı: " + ex.Message); }
+        }
+        if (cfg.ShowInNx && nDisp > 0)
+        {
+            if (nDisp > cfg.MaxDisplayTriangles)
+                lw.WriteLine(string.Format("Gösterim atlandı: {0} üçgen > MaxDisplayTriangles ({1}). SampleSize'ı büyütün veya STL'i kullanın.", nDisp, cfg.MaxDisplayTriangles));
+            else
+            {
+                uf.Ui.SetStatus("Sealant: NX'te gösteriliyor...");
+                sw.Restart();
+                ShowRegions(work, r, bodies, cfg, workToMm);
+                lw.WriteLine(string.Format("Gösterim: {0} üçgen, {1} nesne, layer {2}  ({3:F1} s)  - geri almak için Ctrl+Z",
+                    nDisp, r.Display.Count, cfg.DisplayLayer, sw.Elapsed.TotalSeconds));
+            }
+        }
         uf.Ui.SetStatus("Sealant: tamamlandı");
+    }
+
+    // NX renk paletinden belirgin renkler (kırmızı, turuncu, sarı, yeşil, camgöbeği, mavi, mor, pembe ...)
+    static readonly int[] Palette = new int[] { 186, 78, 6, 36, 103, 211, 181, 151, 25, 120, 160, 55 };
+
+    /// Her parça çifti için bir facet nesnesi: renkli, isimli, ayrı layer'da. Tek undo adımı.
+    static void ShowRegions(Part work, SealantResult r, List<BodyInfo> bodies, Settings cfg, double workToMm)
+    {
+        theSession.SetUndoMark(Session.MarkVisibility.Visible, "Sealant gösterimi");
+        try { uf.Layer.SetStatus(cfg.DisplayLayer, UFConstants.UF_LAYER_SELECTABLE_LAYER); } catch { }
+        double inv = 1.0 / workToMm;
+        double[,] v = new double[3, 3], nn = new double[3, 3];
+        int[] adj = new int[] { UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID };
+        int idx = 0;
+        lw.WriteLine("---- Gösterim nesneleri (renk = parça çifti) ----");
+        foreach (var kv in Report.SortedPairs(r))
+        {
+            List<float> d;
+            if (!r.Display.TryGetValue(kv.Key, out d) || d.Count < 9) continue;
+            idx++;
+            string name = "SEALANT_" + idx.ToString("000");
+            int color = Palette[(idx - 1) % Palette.Length];
+            try
+            {
+                Tag model;
+                uf.Facet.CreateModel(work.Tag, out model);
+                for (int i = 0; i + 8 < d.Count; i += 9)
+                {
+                    V3 a = new V3(d[i], d[i + 1], d[i + 2]), b = new V3(d[i + 3], d[i + 4], d[i + 5]), c = new V3(d[i + 6], d[i + 7], d[i + 8]);
+                    V3 n = V3.Cross(b - a, c - a).Unit();
+                    for (int k = 0; k < 3; k++)
+                    {
+                        v[k, 0] = d[i + 3 * k] * inv; v[k, 1] = d[i + 3 * k + 1] * inv; v[k, 2] = d[i + 3 * k + 2] * inv;
+                        nn[k, 0] = n.X; nn[k, 1] = n.Y; nn[k, 2] = n.Z;
+                    }
+                    int fid; uf.Facet.AddFacetToModel(model, 3, v, nn, adj, out fid);
+                }
+                uf.Facet.ModelEditsDone(model);
+                uf.Obj.SetName(model, name);
+                uf.Obj.SetColor(model, color);
+                uf.Obj.SetLayer(model, cfg.DisplayLayer);
+                try { uf.Disp.AddItemToDisplay(model); } catch { }
+                int a2 = (int)(kv.Key >> 32), b2 = (int)(kv.Key & 0xffffffffL);
+                lw.WriteLine(string.Format("  {0}  renk {1,3}  {2,9} g  {3}  <->  {4}", name, color,
+                    Report.Fmt(kv.Value.Vol * cfg.DensityGcm3 * 1e-3, 2), bodies[a2].Name, bodies[b2].Name));
+            }
+            catch (Exception ex) { lw.WriteLine("  " + name + " oluşturulamadı: " + ex.Message); }
+        }
+        try { uf.Disp.Regenerate(); } catch { }
+    }
+
+    /// Önceki çalıştırmanın work part'ta bıraktığı SEALANT_* facet nesnelerini ve CG noktasını siler.
+    static int DeletePrevious(Part work)
+    {
+        var del = new List<Tag>();
+        foreach (int type in new int[] { UFConstants.UF_faceted_model_type, UFConstants.UF_point_type })
+        {
+            Tag t = Tag.Null;
+            while (true)
+            {
+                uf.Obj.CycleObjsInPart(work.Tag, type, ref t);
+                if (t == Tag.Null) break;
+                string nm = "";
+                try { uf.Obj.AskName(t, out nm); } catch { continue; }
+                if (nm != null && nm.StartsWith("SEALANT_", StringComparison.OrdinalIgnoreCase)) del.Add(t);
+            }
+        }
+        foreach (Tag t in del) { try { uf.Obj.DeleteObject(t); } catch { } }
+        return del.Count;
     }
 
     public static int GetUnloadOption(string dummy) { return (int)Session.LibraryUnloadOption.Immediately; }

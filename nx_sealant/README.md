@@ -10,6 +10,12 @@ Bağlantı bölgeleri (menteşe, cıvata, burç vb. ve çevresindeki emniyet pay
 3. Açılan seçim penceresinde ek olarak hariç tutulacak bileşen/gövdeleri seçin (yoksa OK).
 4. Sonuç Listing Window'da; parça çifti bazında CSV `%TEMP%` altına yazılır;
    CG'ye `SEALANT_CG` isimli nokta konur.
+5. **Sealant bölgeleri montajda gösterilir:** her parça çifti için boşluğun orta
+   düzleminde renkli bir facet nesnesi (`SEALANT_001`, `SEALANT_002`, ...) layer 251'e
+   eklenir. Listing Window hangi nesnenin hangi parça çiftine ait olduğunu ve ağırlığını
+   yazar. Parçaları gizleyin veya saydam yapın, sealant bölgeleri görünür. Tek adımda
+   Ctrl+Z ile geri alınır; makro tekrar çalışınca eski `SEALANT_*` nesneleri silinir.
+   Component part'lar değiştirilmez. Aynı bölgeler `%TEMP%` altına STL olarak da yazılır.
 
 ## Ayarlar (dosyanın başındaki `Settings` sınıfı)
 | Ayar | Varsayılan | Anlamı |
@@ -22,6 +28,9 @@ Bağlantı bölgeleri (menteşe, cıvata, burç vb. ve çevresindeki emniyet pay
 | `ExcludeAttribute` | `SEALANT_EXCLUDE` | Bu attribute'a sahip bileşen/part/gövde hariç |
 | `ExcludeMargin` | 10 mm | Hariç parçaların çevresinde sealant'sız bırakılan mesafe |
 | `KeepOutName` / `KeepOutLayer` | `SEAL_KEEPOUT` / 250 | Kullanıcının çizdiği "yasak hacim" solidleri |
+| `ShowInNx` / `DisplayLayer` | true / 251 | Sealant bölgelerini montajda göster / layer'ı |
+| `MaxDisplayTriangles` | 3 000 000 | Üstündeyse NX'te çizilmez, sadece STL yazılır |
+| `WriteStl` | true | Sealant bölgelerini STL olarak kaydet |
 
 ## Test (NX gerekmez)
 ```

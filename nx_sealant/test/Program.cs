@@ -35,6 +35,20 @@ public static class Program
         Console.WriteLine("{0,-4} {1,-45} beklenen {2,12:F3}  bulunan {3,12:F3}", ok ? "OK" : "FAIL", what, exp, got);
     }
 
+    static double DispArea(SealantResult r, out double minZ, out double maxZ)
+    {
+        double A = 0; minZ = double.MaxValue; maxZ = -double.MaxValue;
+        foreach (var kv in r.Display)
+            for (int i = 0; i + 8 < kv.Value.Count; i += 9)
+            {
+                var d = kv.Value;
+                V3 a = new V3(d[i], d[i + 1], d[i + 2]), b = new V3(d[i + 3], d[i + 4], d[i + 5]), c = new V3(d[i + 6], d[i + 7], d[i + 8]);
+                A += 0.5 * V3.Cross(b - a, c - a).Len();
+                minZ = Math.Min(minZ, Math.Min(a.Z, Math.Min(b.Z, c.Z))); maxZ = Math.Max(maxZ, Math.Max(a.Z, Math.Max(b.Z, c.Z)));
+            }
+        return A;
+    }
+
     public static int Main()
     {
         var cfg = new Settings(); cfg.MinGap = 0.1; cfg.MaxGap = 3; cfg.SampleSize = 1; cfg.FacetSize = 8; cfg.ExcludeMargin = 10;
@@ -49,6 +63,13 @@ public static class Program
             Check("1 hacim mm3", r.Total.Vol, 5000, 0.01);
             Check("1 CG x", cg.X, 75, 0.002); Check("1 CG y", cg.Y, 50, 0.002); Check("1 CG z", cg.Z, 2.5, 0.002);
             Check("1 kütle kg (1.55 g/cm3)", r.MassKg, 5000 * 1.55e-6, 0.01);
+            double z0, z1; double da = DispArea(r, out z0, out z1);
+            Check("1 gösterim alanı = sealant alanı", da, r.Total.Area, 0.001);
+            Check("1 gösterim orta düzlemde (z min)", z0, 2.5, 0.001);
+            Check("1 gösterim orta düzlemde (z max)", z1, 2.5, 0.001);
+            string stl = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "sealant_test.stl");
+            Report.WriteStl(stl, r);
+            Check("1 STL boyutu", new System.IO.FileInfo(stl).Length, 84 + 50 * r.DisplayTriangleCount(), 0);
             // İndeks sırası ters olsa da aynı sonuç (çift sayım yok)
             var s2 = new TriSoup(cfg.FacetSize); var b2 = new List<BodyInfo>();
             AddBox(s2, b2, "B", BodyRole.Normal, 50, 0, 3, 150, 100, 5);
@@ -74,6 +95,9 @@ public static class Program
             var r = SealantSolver.Run(s, b, cfg);
             Check("3 menteşe payı düşülmüş hacim", r.Total.Vol, 5000 - removed, 0.01);
             Check("3 menteşe-B çifti yok (çift sayısı)", r.Pairs.Count, 1, 0);
+            double z0, z1;
+            Check("3 gösterim alanı = sealant alanı", DispArea(r, out z0, out z1), r.Total.Area, 0.001);
+            Check("3 gösterim nesnesi sayısı", r.Display.Count, 1, 0);
         }
         // 4) Keep-out gövdesi
         {
@@ -112,6 +136,7 @@ public static class Program
                 }
             var sw = Stopwatch.StartNew();
             var r = SealantSolver.Run(s, b, cfg);
+            Console.WriteLine("     6: gösterim üçgeni {0}", r.DisplayTriangleCount());
             Console.WriteLine("     6: {0} gövde, {1} üçgen, {2} aday üçgen, {3} örnek -> {4:F2} s ({5} çekirdek)",
                 b.Count, s.Count, r.CandidateTriangles, r.Total.Samples, sw.Elapsed.TotalSeconds, Environment.ProcessorCount);
             Check("6 performans modeli toplam hacim", r.Total.Vol, exp, 0.01);
