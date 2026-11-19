@@ -68,6 +68,7 @@ Module HizliDisYuzey
         Public P() As Double
         Public Nrm() As Double
         Public Bd As Tag
+        Public FaceTag As Tag
         Public IsEntry As Boolean
         Public InsAfter As Integer
     End Class
@@ -177,6 +178,7 @@ Module HizliDisYuzey
         Next
         lw.WriteLine("Boyut (" & u & ")       : " & F1(bbMax(0) - bbMin(0)) & " x " & F1(bbMax(1) - bbMin(1)) & " x " & F1(bbMax(2) - bbMin(2)))
         lw.WriteLine("")
+        SelfTest()
 
         ' ==================== 1) DIŞ YÜZEY ====================
         OuterPass(u)
@@ -196,7 +198,10 @@ Module HizliDisYuzey
             lw.WriteLine("   BOYA AĞIRLIĞI    : " & (outM2 * PAINT_KG_M2).ToString("N3") & " kg")
         End If
         lw.WriteLine("")
-        If badRays > 0 Then lw.WriteLine("Not: " & badRays.ToString() & " ışın, kenar/teğet geçiş nedeniyle güvenilmez bulunup atlandı.")
+        lw.WriteLine("Tanı: ışın=" & diagRays.ToString() & ", çarpan ışın=" & diagHitRays.ToString() & _
+                     ", toplam çarpma=" & diagHits.ToString() & ", çift yön=" & diagBidir.ToString() & _
+                     ", güvenilmez=" & badRays.ToString() & ", normal düzeltme=" & diagNormFix.ToString() & _
+                     ", hata=" & diagExc.ToString() & If(diagExcMsg <> "", " (" & diagExcMsg & ")", ""))
         lw.WriteLine("Toplam süre: " & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk")
         Status("Analiz tamamlandı.")
 
@@ -341,49 +346,70 @@ Module HizliDisYuzey
     End Function
 
     ' ================================ IŞIN ATMA ================================
-    ' ax yönünde (+) ışın; c1, c2 = diğer iki eksenin koordinatları (artan eksen sırasıyla)
-    Function CastLine(ax As Integer, c1 As Double, c2 As Double, dummy As Object) As List(Of Hit)
-        Dim res As New List(Of Hit)
-        Dim a1 As Integer = If(ax = 0, 1, 0)
-        Dim a2 As Integer = If(ax = 2, 1, 2)
+    ' ---- Tanı sayaçları ----
+    Dim diagRays As Long = 0
+    Dim diagHitRays As Long = 0
+    Dim diagHits As Long = 0
+    Dim diagExc As Long = 0
+    Dim diagExcMsg As String = ""
+    Dim diagBidir As Long = 0
+    Dim diagNormFix As Long = 0
 
-        ' Sadece bu hattı kesen gövdeler
-        Dim cand As New List(Of Tag)
-        Dim e As Double = MERGE_TOL * 10
-        For b As Integer = 0 To bodyTags.Length - 1
-            Dim bx() As Double = bodyBox(b)
-            If c1 >= bx(a1) - e AndAlso c1 <= bx(a1 + 3) + e AndAlso c2 >= bx(a2) - e AndAlso c2 <= bx(a2 + 3) + e Then
-                cand.Add(bodyTags(b))
-            End If
-        Next
-        If cand.Count = 0 Then Return res
-
+    ' Tek yönde ışın atar, ham çarpmaları döndürür (dirSign = +1 veya -1). Hata olursa Nothing.
+    Function TraceRaw(ax As Integer, a1 As Integer, a2 As Integer, c1 As Double, c2 As Double, _
+                      dirSign As Double, cand As List(Of Tag)) As List(Of Hit)
+        Dim raw As New List(Of Hit)
         Dim origin(2) As Double, dirv(2) As Double
-        origin(ax) = bbMin(ax) - Math.Max(1.0, OUT_SPACING)
+        Dim margin As Double = Math.Max(1.0, OUT_SPACING)
+        If dirSign > 0 Then
+            origin(ax) = bbMin(ax) - margin
+        Else
+            origin(ax) = bbMax(ax) + margin
+        End If
         origin(a1) = c1 : origin(a2) = c2
-        dirv(ax) = 1.0
+        dirv(ax) = dirSign
         Dim nRes As Integer = 0
         Dim rh() As UFModl.RayHitPointInfo = Nothing
         Try
             ufs.Modl.TraceARay(cand.Count, cand.ToArray(), origin, dirv, identityMtx, MAX_HITS, nRes, rh)
         Catch ex As Exception
-            badRays += 1
-            Return res
+            diagExc += 1
+            If diagExcMsg = "" Then diagExcMsg = ex.Message
+            Return Nothing
         End Try
-        If nRes = 0 OrElse rh Is Nothing Then Return res
-
-        Dim raw As New List(Of Hit)
+        If nRes = 0 OrElse rh Is Nothing Then Return raw
         For q As Integer = 0 To Math.Min(nRes, rh.Length) - 1
             Dim hh As New Hit()
             hh.P = New Double() {rh(q).hit_point(0), rh(q).hit_point(1), rh(q).hit_point(2)}
             hh.Nrm = Normalize(New Double() {rh(q).hit_normal(0), rh(q).hit_normal(1), rh(q).hit_normal(2)})
             hh.Bd = rh(q).hit_body
+            hh.FaceTag = rh(q).hit_face
             hh.T = hh.P(ax)
+            If Math.Abs(hh.Nrm(0)) + Math.Abs(hh.Nrm(1)) + Math.Abs(hh.Nrm(2)) < 0.5 Then
+                hh.Nrm = FaceNormalAt(hh.FaceTag, hh.P)   ' ışın normal vermediyse yüzeyden hesapla
+                diagNormFix += 1
+            End If
             raw.Add(hh)
         Next
-        raw.Sort(Function(x As Hit, y As Hit) x.T.CompareTo(y.T))
+        Return raw
+    End Function
 
-        ' Aynı gövdenin aynı noktadaki tekrar çarpmalarını (kenar geçişi) birleştir
+    Function FaceNormalAt(f As Tag, p() As Double) As Double()
+        Try
+            Dim prm(1) As Double, fp(2) As Double
+            ufs.Modl.AskFaceParm(f, p, prm, fp)
+            Dim pt(2), u1(2), v1(2), u2(2), v2(2), nrm(2), rad(1) As Double
+            ufs.Modl.AskFaceProps(f, prm, pt, u1, v1, u2, v2, nrm, rad)
+            Return Normalize(nrm)
+        Catch ex As Exception
+            Return New Double() {0, 0, 0}
+        End Try
+    End Function
+
+    ' Sırala, tekrarları birleştir, giriş/çıkış belirle. Gövde sayımı tek kalırsa ok = False.
+    Function BuildHits(raw As List(Of Hit), ByRef ok As Boolean) As List(Of Hit)
+        Dim res As New List(Of Hit)
+        raw.Sort(Function(x As Hit, y As Hit) x.T.CompareTo(y.T))
         Dim lastT As New Dictionary(Of Tag, Double)
         For Each hh As Hit In raw
             Dim lt As Double
@@ -391,8 +417,6 @@ Module HizliDisYuzey
             lastT(hh.Bd) = hh.T
             res.Add(hh)
         Next
-
-        ' Giriş / çıkış (gövde bazında tek-çift sayım)
         Dim inside As New Dictionary(Of Tag, Boolean)
         For Each hh As Hit In res
             Dim st As Boolean = False
@@ -400,12 +424,11 @@ Module HizliDisYuzey
             hh.IsEntry = Not st
             inside(hh.Bd) = Not st
         Next
+        ok = True
         For Each kv As KeyValuePair(Of Tag, Boolean) In inside
-            If kv.Value Then
-                badRays += 1               ' teğet geçiş: güvenilmez ışın
-                Return New List(Of Hit)
-            End If
+            If kv.Value Then ok = False
         Next
+        If Not ok Then Return res
 
         ' Aynı noktada temas eden iki parçada önce çıkış, sonra giriş gelsin
         Dim swapped As Boolean = True
@@ -420,7 +443,6 @@ Module HizliDisYuzey
                 End If
             Next
         End While
-
         Dim cnt As Integer = 0
         For Each hh As Hit In res
             If hh.IsEntry Then cnt += 1 Else cnt -= 1
@@ -429,11 +451,72 @@ Module HizliDisYuzey
         Return res
     End Function
 
+    ' ax yönünde ışın hattı; c1, c2 = diğer iki eksenin koordinatları (artan eksen sırasıyla)
+    Function CastLine(ax As Integer, c1 As Double, c2 As Double, dummy As Object) As List(Of Hit)
+        Dim a1 As Integer = If(ax = 0, 1, 0)
+        Dim a2 As Integer = If(ax = 2, 1, 2)
+        Dim cand As New List(Of Tag)
+        Dim e As Double = MERGE_TOL * 10
+        For b As Integer = 0 To bodyTags.Length - 1
+            Dim bx() As Double = bodyBox(b)
+            If c1 >= bx(a1) - e AndAlso c1 <= bx(a1 + 3) + e AndAlso c2 >= bx(a2) - e AndAlso c2 <= bx(a2 + 3) + e Then
+                cand.Add(bodyTags(b))
+            End If
+        Next
+        If cand.Count = 0 Then Return New List(Of Hit)
+        diagRays += 1
+
+        Dim fwd As List(Of Hit) = TraceRaw(ax, a1, a2, c1, c2, 1.0, cand)
+        If fwd Is Nothing Then Return New List(Of Hit)
+        If fwd.Count = 0 Then Return fwd
+        diagHitRays += 1
+        diagHits += fwd.Count
+        Dim ok As Boolean = False
+        Dim res As List(Of Hit) = BuildHits(fwd, ok)
+        If ok Then Return res
+
+        ' Tek yön eksik sonuç verdi (ör. sadece giriş noktaları): ters yönden de at, birleştir
+        Dim bwd As List(Of Hit) = TraceRaw(ax, a1, a2, c1, c2, -1.0, cand)
+        If bwd IsNot Nothing AndAlso bwd.Count > 0 Then
+            diagBidir += 1
+            Dim both As New List(Of Hit)(fwd)
+            both.AddRange(bwd)
+            res = BuildHits(both, ok)
+            If ok Then Return res
+        End If
+        badRays += 1
+        Return New List(Of Hit)
+    End Function
+
+    ' Başlangıçta tek gövde üzerinde ham ışın sonucunu Info penceresine yazar
+    Sub SelfTest()
+        lw.WriteLine("---- Işın testi: ilk gövde, X yönü, kutu merkezinden ----")
+        Dim bx() As Double = bodyBox(0)
+        Dim c1 As Double = (bx(1) + bx(4)) / 2 + MERGE_TOL * 13.7
+        Dim c2 As Double = (bx(2) + bx(5)) / 2 + MERGE_TOL * 13.7
+        Dim cand As New List(Of Tag)
+        cand.Add(bodyTags(0))
+        For Each sg As Double In New Double() {1.0, -1.0}
+            Dim hl As List(Of Hit) = TraceRaw(0, 1, 2, c1, c2, sg, cand)
+            If hl Is Nothing Then
+                lw.WriteLine("  yön " & sg.ToString() & " : HATA -> " & diagExcMsg)
+            Else
+                lw.WriteLine("  yön " & sg.ToString() & " : " & hl.Count.ToString() & " çarpma")
+                For Each hh As Hit In hl
+                    lw.WriteLine("     X = " & F2(hh.P(0)) & "   normal = (" & F2(hh.Nrm(0)) & ", " & F2(hh.Nrm(1)) & ", " & F2(hh.Nrm(2)) & ")")
+                Next
+            End If
+        Next
+        lw.WriteLine("")
+        diagExc = 0 : diagExcMsg = "" : diagNormFix = 0
+    End Sub
+
     ' Normalin baskın ekseni (eşitlikte küçük indeks)
     Function DomAxis(n() As Double) As Integer
         Dim ax As Integer = 0
         If Math.Abs(n(1)) > Math.Abs(n(ax)) Then ax = 1
         If Math.Abs(n(2)) > Math.Abs(n(ax)) Then ax = 2
+        If Math.Abs(n(ax)) < 0.1 Then Return -1   ' geçersiz normal
         Return ax
     End Function
 
