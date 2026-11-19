@@ -6,11 +6,13 @@
 '     ışınlar atılır. Her ışın yol boyunca tüm yüzey kesişimlerini tek seferde verir.
 '   - SEALANT: Işın bir parçadan çıkıp, tolerans içindeki boşluktan sonra BAŞKA bir
 '     parçaya giriyorsa ve iki yüzey birbirine paralelse burası üst üste gelen yüzeydir.
-'     Sadece birbirine yakın parça çiftlerinin bölgesine ışın atılır (çok hızlı).
+'   - KABA -> İNCE: Önce ~20 mm aralıkla tüm montaj taranır. Temas bölgesinin İÇİNDE
+'     kalan hücreler kaba sonuçla sayılır; sadece temasın KENARLARI ince aralıkla taranır.
 '   - Her nokta, ışın aralığı ve yüzey eğimine göre alan ağırlığı alır; toplam alan ve
 '     alan ağırlık merkezi (CG) hesaplanır.
 '
-'  SONUÇ: Sealant TOPLAM alanı + ağırlık merkezi (CG) + hacim tahmini + parça çifti dökümü
+'  SONUÇ: Sealant toplam alan, TOPLAM AĞIRLIK, MOMENTLER (Mx, My, Mz), CG = M / W,
+'         hacim tahmini ve parça çifti dökümü
 '  Çalıştırma: dosyayı .vb uzantısıyla kaydedin -> Alt+F8 -> Browse -> Run
 ' =====================================================================================
 Option Strict Off
