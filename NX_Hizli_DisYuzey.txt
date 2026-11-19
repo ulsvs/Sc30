@@ -77,9 +77,9 @@ Module HizliDisYuzey
         Public W As Double = 0
         Public S(2) As Double
         Public GapW As Double = 0
-        Public Sub AddPt(p() As Double, w As Double)
-            W += w
-            S(0) += p(0) * w : S(1) += p(1) * w : S(2) += p(2) * w
+        Public Sub AddPt(pt() As Double, wt As Double)
+            Me.W += wt
+            Me.S(0) += pt(0) * wt : Me.S(1) += pt(1) * wt : Me.S(2) += pt(2) * wt
         End Sub
         Public Function CG(c As Integer) As Double
             If W <= 0 Then Return 0
