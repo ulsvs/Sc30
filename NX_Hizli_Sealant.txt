@@ -230,113 +230,91 @@ Module HizliSealant
 
     ' ================================== SEALANT GEÇİŞİ ================================
     Sub SealPass(u As String)
-        ' 1) Birbirine GAP_TOL'dan yakın gövde çiftleri ve ortak bölge kutuları
-        Dim boxes As New List(Of Double())
-        Dim nb As Integer = bodyTags.Length
-        For i As Integer = 0 To nb - 1
-            If i Mod 10 = 0 Then Status("Sealant: yakın parça çiftleri aranıyor " & (i + 1).ToString() & " / " & nb.ToString())
-            For j As Integer = i + 1 To nb - 1
-                Dim A() As Double = bodyBox(i), B() As Double = bodyBox(j)
-                Dim ok As Boolean = True
-                For c As Integer = 0 To 2
-                    If A(c + 3) + GAP_TOL < B(c) OrElse B(c + 3) + GAP_TOL < A(c) Then ok = False
-                Next
-                If Not ok Then Continue For
-                If MinDist(bodyTags(i), bodyTags(j)) > GAP_TOL + MERGE_TOL Then Continue For
-                Dim bx(5) As Double
-                For c As Integer = 0 To 2
-                    bx(c) = Math.Max(A(c), B(c)) - GAP_TOL
-                    bx(c + 3) = Math.Min(A(c + 3), B(c + 3)) + GAP_TOL
-                Next
-                boxes.Add(bx)
-            Next
-        Next
-        lw.WriteLine("Sealant: birbirine yakın parça çifti = " & boxes.Count.ToString())
-        If boxes.Count = 0 Then Return
-
-        ' 2) KABA -> İNCE tarama
-        '    Önce ~COARSE_SEAL aralıklı kaba ışınlarla temas OLAN bölgeler bulunur,
-        '    sonra sadece bu bölgeler (ve komşuları) ince aralıkla taranır.
+        ' KABA -> İNCE tarama (parça çifti / mesafe ölçümü YOK, bu yüzden hızlı):
+        '  1) Tüm montaj 3 eksende ~COARSE_SEAL aralıkla taranır, temas olan hücreler bulunur.
+        '  2) Sadece bu hücreler (ve 4 komşusu) girilen ince aralıkla taranıp alan/CG toplanır.
         Dim h As Double = SEAL_SPACING
         Dim R As Integer = Math.Max(1, CInt(Math.Floor(COARSE_SEAL / h)))
         Dim jit As Double = h * 0.0173
-        Dim sw As Stopwatch = Stopwatch.StartNew()
+        Dim swAll As Stopwatch = Stopwatch.StartNew()
         Dim coarseTotal As Long = 0, fineTotal As Long = 0
+        Dim tCoarse As Double = 0, tFine As Double = 0
+
+        ' Kaba hücre toplam sayısı (ilerleme için)
+        Dim allCells As Long = 0
+        For ax As Integer = 0 To 2
+            Dim a1 As Integer = If(ax = 0, 1, 0)
+            Dim a2 As Integer = If(ax = 2, 1, 2)
+            Dim n1 As Integer = CInt(Math.Ceiling((bbMax(a1) - bbMin(a1)) / h)) + 1
+            Dim n2 As Integer = CInt(Math.Ceiling((bbMax(a2) - bbMin(a2)) / h)) + 1
+            allCells += CLng((n1 + R - 1) \ R) * ((n2 + R - 1) \ R)
+        Next
+        Dim cDone As Long = 0
 
         For ax As Integer = 0 To 2
             Dim a1 As Integer = If(ax = 0, 1, 0)
             Dim a2 As Integer = If(ax = 2, 1, 2)
             Dim n1 As Integer = CInt(Math.Ceiling((bbMax(a1) - bbMin(a1)) / h)) + 1
             Dim n2 As Integer = CInt(Math.Ceiling((bbMax(a2) - bbMin(a2)) / h)) + 1
+            Dim cn1 As Integer = (n1 + R - 1) \ R
             Dim cn2 As Integer = (n2 + R - 1) \ R
 
-            ' Kutularla kesişen kaba hücreler
-            Dim cells As New Dictionary(Of Long, Boolean)
-            For Each bx As Double() In boxes
-                Dim p1 As Integer = Math.Max(0, CInt(Math.Ceiling((bx(a1) - bbMin(a1)) / h - 0.5)))
-                Dim q1 As Integer = Math.Min(n1 - 1, CInt(Math.Floor((bx(a1 + 3) - bbMin(a1)) / h - 0.5)))
-                Dim p2 As Integer = Math.Max(0, CInt(Math.Ceiling((bx(a2) - bbMin(a2)) / h - 0.5)))
-                Dim q2 As Integer = Math.Min(n2 - 1, CInt(Math.Floor((bx(a2 + 3) - bbMin(a2)) / h - 0.5)))
-                If p1 > q1 OrElse p2 > q2 Then Continue For
-                For ci As Integer = p1 \ R To q1 \ R
-                    For cj As Integer = p2 \ R To q2 \ R
-                        Dim ck As Long = CLng(ci) * cn2 + cj
-                        If Not cells.ContainsKey(ck) Then cells.Add(ck, True)
-                    Next
-                Next
-            Next
-
-            ' Kaba tarama: her hücrenin ortasından tek ışın, temas var mı?
-            Dim active As New List(Of Long)
-            If R = 1 Then
-                active.AddRange(cells.Keys)
-            Else
-                Dim cDone As Long = 0
-                For Each ck As Long In cells.Keys
-                    Dim ci As Integer = CInt(ck \ cn2), cj As Integer = CInt(ck Mod cn2)
+            ' --- 1) Kaba tarama ---
+            Dim t0 As Double = swAll.Elapsed.TotalMinutes
+            Dim active As New Dictionary(Of Long, Boolean)
+            For ci As Integer = 0 To cn1 - 1
+                For cj As Integer = 0 To cn2 - 1
                     Dim ii As Integer = Math.Min(n1 - 1, ci * R + R \ 2)
                     Dim jj As Integer = Math.Min(n2 - 1, cj * R + R \ 2)
                     Dim hits As List(Of Hit) = CastLine(ax, bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit, Nothing)
-                    If ProcessSeal(hits, ax, h, False) Then active.Add(ck)
+                    If hits.Count > 1 Then
+                        If R = 1 Then
+                            ProcessSeal(hits, ax, h, True)       ' kaba = ince, doğrudan topla
+                        ElseIf ProcessSeal(hits, ax, h, False) Then
+                            active(CLng(ci) * cn2 + cj) = True
+                        End If
+                    End If
                     cDone += 1
-                    Progress("Sealant kaba tarama (eksen " & ax.ToString() & ")", cDone, cells.Count, sw)
+                    Progress("Sealant kaba tarama", cDone, allCells, swAll)
                 Next
-                coarseTotal += cells.Count
-            End If
+            Next
+            coarseTotal += CLng(cn1) * cn2
+            tCoarse += swAll.Elapsed.TotalMinutes - t0
+            If R = 1 Then Continue For
 
-            ' Aktif hücreler + komşuları -> ince ışın hatları
+            ' --- 2) Aktif hücreler + 4 komşusu -> ince hatlar ---
             Dim fineLines As New Dictionary(Of Long, Boolean)
-            For Each ck As Long In active
+            Dim di() As Integer = {0, 1, -1, 0, 0}
+            Dim dj() As Integer = {0, 0, 0, 1, -1}
+            For Each ck As Long In active.Keys
                 Dim ci As Integer = CInt(ck \ cn2), cj As Integer = CInt(ck Mod cn2)
-                For di As Integer = -1 To 1
-                    For dj As Integer = -1 To 1
-                        If R = 1 AndAlso (di <> 0 OrElse dj <> 0) Then Continue For
-                        Dim ni As Integer = ci + di, nj As Integer = cj + dj
-                        If ni < 0 OrElse nj < 0 Then Continue For
-                        If Not cells.ContainsKey(CLng(ni) * cn2 + nj) Then Continue For
-                        For ii As Integer = ni * R To Math.Min(n1 - 1, ni * R + R - 1)
-                            For jj As Integer = nj * R To Math.Min(n2 - 1, nj * R + R - 1)
-                                Dim lk As Long = CLng(ii) * n2 + jj
-                                If Not fineLines.ContainsKey(lk) Then fineLines.Add(lk, True)
-                            Next
+                For d As Integer = 0 To 4
+                    Dim ni As Integer = ci + di(d), nj As Integer = cj + dj(d)
+                    If ni < 0 OrElse nj < 0 OrElse ni >= cn1 OrElse nj >= cn2 Then Continue For
+                    For ii As Integer = ni * R To Math.Min(n1 - 1, ni * R + R - 1)
+                        For jj As Integer = nj * R To Math.Min(n2 - 1, nj * R + R - 1)
+                            fineLines(CLng(ii) * n2 + jj) = True
                         Next
                     Next
                 Next
             Next
 
-            ' İnce tarama ve toplama
+            ' --- 3) İnce tarama ve toplama ---
+            Dim t1 As Double = swAll.Elapsed.TotalMinutes
             Dim fDone As Long = 0
+            Dim fsw As Stopwatch = Stopwatch.StartNew()
             For Each lk As Long In fineLines.Keys
                 Dim ii As Integer = CInt(lk \ n2), jj As Integer = CInt(lk Mod n2)
                 Dim hits As List(Of Hit) = CastLine(ax, bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit, Nothing)
                 ProcessSeal(hits, ax, h, True)
                 fDone += 1
-                Progress("Sealant ince tarama (eksen " & ax.ToString() & ")", fDone, fineLines.Count, sw)
+                Progress("Sealant ince tarama (eksen " & ax.ToString() & "/2)", fDone, fineLines.Count, fsw)
             Next
             fineTotal += fineLines.Count
+            tFine += swAll.Elapsed.TotalMinutes - t1
         Next
-        lw.WriteLine("Sealant: kaba ışın = " & coarseTotal.ToString() & ", ince ışın = " & fineTotal.ToString() & _
-                     "  (kaba aralık " & F1(R * h) & ", ince aralık " & F1(h) & ")")
+        lw.WriteLine("Sealant: kaba ışın = " & coarseTotal.ToString() & " (" & tCoarse.ToString("0.0") & " dk), ince ışın = " & _
+                     fineTotal.ToString() & " (" & tFine.ToString("0.0") & " dk)   [kaba aralık " & F1(R * h) & ", ince aralık " & F1(h) & "]")
     End Sub
 
     ' doAccum = False: sadece temas var mı diye bakar (kaba tarama)
