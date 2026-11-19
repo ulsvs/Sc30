@@ -263,7 +263,7 @@ Module HizliSealant
             Dim a2 As Integer = If(ax = 2, 1, 2)
             Dim n1 As Integer = CInt(Math.Ceiling((bbMax(a1) - bbMin(a1)) / h)) + 1
             Dim n2 As Integer = CInt(Math.Ceiling((bbMax(a2) - bbMin(a2)) / h)) + 1
-            Dim mark As New HashSet(Of Long)
+            Dim mark As New Dictionary(Of Long, Boolean)
             lines(ax) = New List(Of Double())
             For Each bx As Double() In boxes
                 Dim p1 As Integer = Math.Max(0, CInt(Math.Ceiling((bx(a1) - bbMin(a1)) / h - 0.5)))
@@ -272,7 +272,9 @@ Module HizliSealant
                 Dim q2 As Integer = Math.Min(n2 - 1, CInt(Math.Floor((bx(a2 + 3) - bbMin(a2)) / h - 0.5)))
                 For ii As Integer = p1 To q1
                     For jj As Integer = p2 To q2
-                        If mark.Add(CLng(ii) * n2 + jj) Then
+                        Dim lineKey As Long = CLng(ii) * n2 + jj
+                        If Not mark.ContainsKey(lineKey) Then
+                            mark.Add(lineKey, True)
                             lines(ax).Add(New Double() {bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit})
                         End If
                     Next
