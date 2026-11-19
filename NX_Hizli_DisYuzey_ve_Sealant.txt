@@ -348,9 +348,9 @@ Module HizliDisYuzeyVeSealant
         If seg = 0 Then Return True
         If hits(seg - 1).InsAfter > 0 Then Return False
         If seg = m Then Return True
-        Dim iA As Integer = Math.Max(0, CInt(Math.Ceiling((hits(seg - 1).T - g0(ax)) / VOX_H - 0.5)))
-        Dim iB As Integer = Math.Min(gn(ax) - 1, CInt(Math.Floor((hits(seg).T - g0(ax)) / VOX_H - 0.5)))
-        For ia As Integer = iA To iB
+        Dim segLo As Integer = Math.Max(0, CInt(Math.Ceiling((hits(seg - 1).T - g0(ax)) / VOX_H - 0.5)))
+        Dim segHi As Integer = Math.Min(gn(ax) - 1, CInt(Math.Floor((hits(seg).T - g0(ax)) / VOX_H - 0.5)))
+        For ia As Integer = segLo To segHi
             If vox(VIdxAxis(ax, ia, i1, i2)) = 2 Then Return True
         Next
         Return False
