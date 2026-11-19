@@ -203,13 +203,19 @@ Module HizliSealant
             lw.WriteLine("   Hacim tahmini    : " & F1(sealAcc.GapW) & " " & u & "³  (alan x boşluk)")
         End If
         lw.WriteLine("")
-        lw.WriteLine("Parça çiftleri (sealant alanı):")
+        lw.WriteLine("Parça çiftleri (ağırlık ve moment):")
+        Dim m2fp As Double = If(isInch, 0.00064516, 0.000001)
+        Dim kp As Double = If(SEAL_KG_M2 > 0, SEAL_KG_M2, 1.0)
         For Each kv As KeyValuePair(Of String, Accum) In pairAcc
-            Dim pm2 As Double = kv.Value.W * If(isInch, 0.00064516, 0.000001)
-            lw.WriteLine("   " & kv.Key & " : " & F1(kv.Value.W) & " " & u & "²" & _
-                         If(SEAL_KG_M2 > 0, "  (" & (pm2 * SEAL_KG_M2).ToString("N3") & " kg)", "") & _
+            Dim pw As Double = kv.Value.W * m2fp * kp
+            lw.WriteLine("   " & kv.Key & " : W = " & pw.ToString("N4") & If(SEAL_KG_M2 > 0, " kg", " m²") & _
+                         "   Mx = " & (kv.Value.S(0) * m2fp * kp).ToString("N2") & _
+                         "   My = " & (kv.Value.S(1) * m2fp * kp).ToString("N2") & _
+                         "   Mz = " & (kv.Value.S(2) * m2fp * kp).ToString("N2") & _
                          "   CG (" & F1(kv.Value.CG(0)) & ", " & F1(kv.Value.CG(1)) & ", " & F1(kv.Value.CG(2)) & ")")
         Next
+        lw.WriteLine("")
+        WriteMassBlock("SEALANT (tüm çiftlerin toplamı)", sealAcc, SEAL_KG_M2, isInch, u)
         lw.WriteLine("")
         If interfCount > 0 Then lw.WriteLine("Not: " & interfCount.ToString() & " noktada parçalar iç içe (girişim) bulundu, sealant'a dahil edilmedi.")
         lw.WriteLine("Tanı: ışın=" & diagRays.ToString() & ", çarpan ışın=" & diagHitRays.ToString() & _
@@ -228,6 +234,30 @@ Module HizliSealant
         End If
     End Sub
 
+
+    ' Toplu ağırlık / moment / CG bloğu: CG = Moment / Ağırlık
+    Sub WriteMassBlock(title As String, acc As Accum, kgPerM2 As Double, isInch As Boolean, u As String)
+        Dim m2f As Double = If(isInch, 0.00064516, 0.000001)        ' alan birimi -> m²
+        Dim k As Double = If(kgPerM2 > 0, kgPerM2, 1.0)
+        Dim wKg As Double = acc.W * m2f * k
+        Dim momX As Double = acc.S(0) * m2f * k
+        Dim momY As Double = acc.S(1) * m2f * k
+        Dim momZ As Double = acc.S(2) * m2f * k
+        Dim unitW As String = If(kgPerM2 > 0, "kg", "m² (katsayı girilmedi)")
+        lw.WriteLine("---------------- " & title & " : TOPLU SONUÇ ----------------")
+        lw.WriteLine("   Toplam alan          : " & (acc.W * m2f).ToString("N4") & " m²")
+        If kgPerM2 > 0 Then lw.WriteLine("   Katsayı              : " & kgPerM2.ToString("N4") & " kg/m²")
+        lw.WriteLine("   TOPLAM AĞIRLIK  (W)  : " & wKg.ToString("N4") & " " & unitW)
+        lw.WriteLine("   Moment Mx = Σ m·x    : " & momX.ToString("N2") & " " & unitW & "·" & u)
+        lw.WriteLine("   Moment My = Σ m·y    : " & momY.ToString("N2") & " " & unitW & "·" & u)
+        lw.WriteLine("   Moment Mz = Σ m·z    : " & momZ.ToString("N2") & " " & unitW & "·" & u)
+        If wKg > 0 Then
+            lw.WriteLine("   CG = M / W           : X = " & (momX / wKg).ToString("N2") & "   Y = " & (momY / wKg).ToString("N2") & _
+                         "   Z = " & (momZ / wKg).ToString("N2") & " " & u)
+        End If
+        lw.WriteLine("")
+    End Sub
+
     ' ================================== SEALANT GEÇİŞİ ================================
     Sub SealPass(u As String)
         ' KABA -> İNCE tarama (parça çifti / mesafe ölçümü YOK, bu yüzden hızlı):
@@ -237,7 +267,7 @@ Module HizliSealant
         Dim R As Integer = Math.Max(1, CInt(Math.Floor(COARSE_SEAL / h)))
         Dim jit As Double = h * 0.0173
         Dim swAll As Stopwatch = Stopwatch.StartNew()
-        Dim coarseTotal As Long = 0, fineTotal As Long = 0
+        Dim coarseTotal As Long = 0, fineTotal As Long = 0, interiorTotal As Long = 0
         Dim tCoarse As Double = 0, tFine As Double = 0
 
         ' Kaba hücre toplam sayısı (ilerleme için)
@@ -259,19 +289,19 @@ Module HizliSealant
             Dim cn1 As Integer = (n1 + R - 1) \ R
             Dim cn2 As Integer = (n2 + R - 1) \ R
 
-            ' --- 1) Kaba tarama ---
+            ' --- 1) Kaba tarama (ışın hücrenin TAM ortasından) ---
             Dim t0 As Double = swAll.Elapsed.TotalMinutes
-            Dim active As New Dictionary(Of Long, Boolean)
+            Dim active As New Dictionary(Of Long, List(Of Hit))
             For ci As Integer = 0 To cn1 - 1
                 For cj As Integer = 0 To cn2 - 1
-                    Dim ii As Integer = Math.Min(n1 - 1, ci * R + R \ 2)
-                    Dim jj As Integer = Math.Min(n2 - 1, cj * R + R \ 2)
-                    Dim hits As List(Of Hit) = CastLine(ax, bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit, Nothing)
+                    Dim x1 As Double = bbMin(a1) + (ci * R + R / 2.0) * h + jit
+                    Dim x2 As Double = bbMin(a2) + (cj * R + R / 2.0) * h + jit
+                    Dim hits As List(Of Hit) = CastLine(ax, x1, x2, Nothing)
                     If hits.Count > 1 Then
                         If R = 1 Then
-                            ProcessSeal(hits, ax, h, True)       ' kaba = ince, doğrudan topla
+                            ProcessSeal(hits, ax, h, True)
                         ElseIf ProcessSeal(hits, ax, h, False) Then
-                            active(CLng(ci) * cn2 + cj) = True
+                            active.Add(CLng(ci) * cn2 + cj, hits)
                         End If
                     End If
                     cDone += 1
@@ -282,22 +312,40 @@ Module HizliSealant
             tCoarse += swAll.Elapsed.TotalMinutes - t0
             If R = 1 Then Continue For
 
-            ' --- 2) Aktif hücreler + 4 komşusu -> ince hatlar ---
+            ' --- 2) İç hücreler (4 komşusu da temaslı) kaba sonuçla sayılır;
+            '        sadece SINIR hücreleri ve dışarıdaki komşuları ince taranır ---
             Dim fineLines As New Dictionary(Of Long, Boolean)
-            Dim di() As Integer = {0, 1, -1, 0, 0}
-            Dim dj() As Integer = {0, 0, 0, 1, -1}
-            For Each ck As Long In active.Keys
-                Dim ci As Integer = CInt(ck \ cn2), cj As Integer = CInt(ck Mod cn2)
-                For d As Integer = 0 To 4
+            Dim di() As Integer = {1, -1, 0, 0}
+            Dim dj() As Integer = {0, 0, 1, -1}
+            Dim interiorCnt As Long = 0
+            For Each kvc As KeyValuePair(Of Long, List(Of Hit)) In active
+                Dim ci As Integer = CInt(kvc.Key \ cn2), cj As Integer = CInt(kvc.Key Mod cn2)
+                Dim allIn As Boolean = True
+                For d As Integer = 0 To 3
                     Dim ni As Integer = ci + di(d), nj As Integer = cj + dj(d)
-                    If ni < 0 OrElse nj < 0 OrElse ni >= cn1 OrElse nj >= cn2 Then Continue For
-                    For ii As Integer = ni * R To Math.Min(n1 - 1, ni * R + R - 1)
-                        For jj As Integer = nj * R To Math.Min(n2 - 1, nj * R + R - 1)
-                            fineLines(CLng(ii) * n2 + jj) = True
-                        Next
-                    Next
+                    If ni < 0 OrElse nj < 0 OrElse ni >= cn1 OrElse nj >= cn2 OrElse Not active.ContainsKey(CLng(ni) * cn2 + nj) Then
+                        allIn = False
+                        If ni >= 0 AndAlso nj >= 0 AndAlso ni < cn1 AndAlso nj < cn2 Then AddCellLines(fineLines, ni, nj, R, n1, n2)
+                    End If
                 Next
+                If allIn Then
+                    ProcessSeal(kvc.Value, ax, R * h, True)   ' bütün hücre = 1 kaba nokta
+                    interiorCnt += 1
+                Else
+                    AddCellLines(fineLines, ci, cj, R, n1, n2)
+                End If
             Next
+            ' İnce taranacak hücrelerden iç (kaba sayılmış) olanları çıkar
+            Dim toRemove As New List(Of Long)
+            For Each lk As Long In fineLines.Keys
+                Dim ii As Integer = CInt(lk \ n2), jj As Integer = CInt(lk Mod n2)
+                Dim ck As Long = CLng(ii \ R) * cn2 + (jj \ R)
+                If active.ContainsKey(ck) AndAlso IsInterior(active, ii \ R, jj \ R, cn1, cn2) Then toRemove.Add(lk)
+            Next
+            For Each lk As Long In toRemove
+                fineLines.Remove(lk)
+            Next
+            interiorTotal += interiorCnt
 
             ' --- 3) İnce tarama ve toplama ---
             Dim t1 As Double = swAll.Elapsed.TotalMinutes
@@ -313,9 +361,23 @@ Module HizliSealant
             fineTotal += fineLines.Count
             tFine += swAll.Elapsed.TotalMinutes - t1
         Next
-        lw.WriteLine("Sealant: kaba ışın = " & coarseTotal.ToString() & " (" & tCoarse.ToString("0.0") & " dk), ince ışın = " & _
+        lw.WriteLine("Sealant: kaba ışın = " & coarseTotal.ToString() & " (" & tCoarse.ToString("0.0") & " dk), iç hücre = " & interiorTotal.ToString() & ", ince ışın = " & _
                      fineTotal.ToString() & " (" & tFine.ToString("0.0") & " dk)   [kaba aralık " & F1(R * h) & ", ince aralık " & F1(h) & "]")
     End Sub
+
+    Sub AddCellLines(fineLines As Dictionary(Of Long, Boolean), ci As Integer, cj As Integer, R As Integer, n1 As Integer, n2 As Integer)
+        For ii As Integer = ci * R To Math.Min(n1 - 1, ci * R + R - 1)
+            For jj As Integer = cj * R To Math.Min(n2 - 1, cj * R + R - 1)
+                fineLines(CLng(ii) * n2 + jj) = True
+            Next
+        Next
+    End Sub
+
+    Function IsInterior(active As Dictionary(Of Long, List(Of Hit)), ci As Integer, cj As Integer, cn1 As Integer, cn2 As Integer) As Boolean
+        If ci <= 0 OrElse cj <= 0 OrElse ci >= cn1 - 1 OrElse cj >= cn2 - 1 Then Return False
+        Return active.ContainsKey(CLng(ci + 1) * cn2 + cj) AndAlso active.ContainsKey(CLng(ci - 1) * cn2 + cj) AndAlso _
+               active.ContainsKey(CLng(ci) * cn2 + cj + 1) AndAlso active.ContainsKey(CLng(ci) * cn2 + cj - 1)
+    End Function
 
     ' doAccum = False: sadece temas var mı diye bakar (kaba tarama)
     Function ProcessSeal(hits As List(Of Hit), ax As Integer, h As Double, doAccum As Boolean) As Boolean

@@ -198,6 +198,7 @@ Module HizliDisYuzey
             lw.WriteLine("   BOYA AĞIRLIĞI    : " & (outM2 * PAINT_KG_M2).ToString("N3") & " kg")
         End If
         lw.WriteLine("")
+        WriteMassBlock("DIŞ YÜZEY BOYASI", outAcc, PAINT_KG_M2, isInch, u)
         lw.WriteLine("Tanı: ışın=" & diagRays.ToString() & ", çarpan ışın=" & diagHitRays.ToString() & _
                      ", toplam çarpma=" & diagHits.ToString() & ", çift yön=" & diagBidir.ToString() & _
                      ", güvenilmez=" & badRays.ToString() & ", normal düzeltme=" & diagNormFix.ToString() & _
@@ -212,6 +213,30 @@ Module HizliDisYuzey
                 lw.WriteLine("CG noktası oluşturulamadı: " & ex.Message)
             End Try
         End If
+    End Sub
+
+
+    ' Toplu ağırlık / moment / CG bloğu: CG = Moment / Ağırlık
+    Sub WriteMassBlock(title As String, acc As Accum, kgPerM2 As Double, isInch As Boolean, u As String)
+        Dim m2f As Double = If(isInch, 0.00064516, 0.000001)        ' alan birimi -> m²
+        Dim k As Double = If(kgPerM2 > 0, kgPerM2, 1.0)
+        Dim wKg As Double = acc.W * m2f * k
+        Dim momX As Double = acc.S(0) * m2f * k
+        Dim momY As Double = acc.S(1) * m2f * k
+        Dim momZ As Double = acc.S(2) * m2f * k
+        Dim unitW As String = If(kgPerM2 > 0, "kg", "m² (katsayı girilmedi)")
+        lw.WriteLine("---------------- " & title & " : TOPLU SONUÇ ----------------")
+        lw.WriteLine("   Toplam alan          : " & (acc.W * m2f).ToString("N4") & " m²")
+        If kgPerM2 > 0 Then lw.WriteLine("   Katsayı              : " & kgPerM2.ToString("N4") & " kg/m²")
+        lw.WriteLine("   TOPLAM AĞIRLIK  (W)  : " & wKg.ToString("N4") & " " & unitW)
+        lw.WriteLine("   Moment Mx = Σ m·x    : " & momX.ToString("N2") & " " & unitW & "·" & u)
+        lw.WriteLine("   Moment My = Σ m·y    : " & momY.ToString("N2") & " " & unitW & "·" & u)
+        lw.WriteLine("   Moment Mz = Σ m·z    : " & momZ.ToString("N2") & " " & unitW & "·" & u)
+        If wKg > 0 Then
+            lw.WriteLine("   CG = M / W           : X = " & (momX / wKg).ToString("N2") & "   Y = " & (momY / wKg).ToString("N2") & _
+                         "   Z = " & (momZ / wKg).ToString("N2") & " " & u)
+        End If
+        lw.WriteLine("")
     End Sub
 
     ' ================================ DIŞ YÜZEY GEÇİŞİ ================================
