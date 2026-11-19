@@ -34,6 +34,9 @@ Module HizliSealant
     Dim NORMAL_ANGLE_DEG As Double = 30.0  ' Sealant: yüzlerin paralellik toleransı (derece)
     Dim SKIP_HIDDEN As Boolean = True      ' Gizli (Hide) bileşenleri atla
     Dim SEAL_KG_M2 As Double = 0.0         ' Sealant katsayısı (kg/m²)         - sorulur
+    Dim SHOW_SEAL_MARKS As Boolean = True  ' Bitince sealant bölgelerini modelde göster
+    Dim SEAL_MARK_COLOR As Integer = 186   ' İşaret rengi (NX renk no: 186 = kırmızı)
+    Dim MAX_MARKS As Integer = 150000      ' Ekrana çizilecek en fazla kare sayısı
     Dim CREATE_CG_POINTS As Boolean = False ' True: CG noktalarını modelde nokta olarak oluştur
     Dim SKIP_KEYWORDS() As String = {"civata", "cıvata", "bolt", "screw", "vida", "somun", "washer", "rondela", _
                                      "percin", "perçin", "rivet", "din912", "din933", "din931", "din934", "din125", _
@@ -92,6 +95,15 @@ Module HizliSealant
 
     Dim sealAcc As New Accum()
     Dim pairAcc As New SortedDictionary(Of String, Accum)
+
+    ' Modelde gösterim için: her sealant noktası bir kare (merkez, ışın ekseni, kenar boyu)
+    Class SealMark
+        Public C() As Double
+        Public Ax As Integer
+        Public Size As Double
+    End Class
+    Dim sealMarks As New List(Of SealMark)
+    Dim sealFaces As New Dictionary(Of Tag, Boolean)
 
     ' ===================================== MAIN =======================================
     Sub Main(ByVal args() As String)
@@ -227,6 +239,8 @@ Module HizliSealant
         lw.WriteLine("Toplam süre: " & sw.Elapsed.TotalMinutes.ToString("0.0") & " dk")
         Status("Analiz tamamlandı.")
 
+        If SHOW_SEAL_MARKS Then ShowSealMarks()
+
         If CREATE_CG_POINTS Then
             Try
                 If sealAcc.W > 0 Then MakePoint(sealAcc)
@@ -238,6 +252,70 @@ Module HizliSealant
 
 
     ' Toplu ağırlık / moment / CG bloğu: CG = Moment / Ağırlık
+    ' Sealant bölgelerini modelde gösterir:
+    '  - Her sealant noktası, temsil ettiği alan büyüklüğünde renkli bir kare olarak çizilir
+    '    (geçici grafik: modele obje EKLEMEZ, F5 / Refresh ile silinir)
+    '  - Sealant gelen yüzler mesaj kutusu açıkken vurgulanır
+    Sub ShowSealMarks()
+        If sealMarks.Count = 0 Then
+            lw.WriteLine("Gösterilecek sealant bölgesi yok.")
+            Return
+        End If
+        Status("Sealant bölgeleri çiziliyor...")
+        Dim attr As UFObj.DispProps
+        attr.layer = 1
+        attr.color = SEAL_MARK_COLOR
+        attr.blank_status = UFConstants.UF_OBJ_NOT_BLANKED
+        attr.line_width = UFConstants.UF_OBJ_WIDTH_THICK
+        attr.font = UFConstants.UF_OBJ_FONT_SOLID
+        attr.highlight_status = False
+
+        Dim nDraw As Integer = Math.Min(sealMarks.Count, MAX_MARKS)
+        Dim stepK As Integer = Math.Max(1, CInt(Math.Ceiling(sealMarks.Count / CDbl(MAX_MARKS))))
+        For idx As Integer = 0 To sealMarks.Count - 1 Step stepK
+            Dim mk As SealMark = sealMarks(idx)
+            Dim a1 As Integer = If(mk.Ax = 0, 1, 0)
+            Dim a2 As Integer = If(mk.Ax = 2, 1, 2)
+            Dim half As Double = mk.Size * 0.45
+            Dim pc(3)() As Double
+            Dim sg1() As Double = {-1, 1, 1, -1}
+            Dim sg2() As Double = {-1, -1, 1, 1}
+            For e As Integer = 0 To 3
+                pc(e) = New Double() {mk.C(0), mk.C(1), mk.C(2)}
+                pc(e)(a1) += sg1(e) * half
+                pc(e)(a2) += sg2(e) * half
+            Next
+            Try
+                For e As Integer = 0 To 3
+                    ufs.Disp.DisplayTemporaryLine(Tag.Null, UFDisp.ViewType.UseWorkView, pc(e), pc((e + 1) Mod 4), attr)
+                Next
+            Catch ex As Exception
+                lw.WriteLine("Sealant işaretleri çizilemedi: " & ex.Message)
+                Exit For
+            End Try
+        Next
+
+        Dim nf As Integer = 0
+        For Each ft As Tag In sealFaces.Keys
+            Try
+                ufs.Disp.SetHighlight(ft, 1)
+                nf += 1
+            Catch ex As Exception
+            End Try
+        Next
+        theUI.NXMessageBox.Show("Sealant Bölgeleri", NXMessageBox.DialogType.Information, _
+            "Sealant gelen bölgeler RENKLİ KARELERLE gösterildi (" & sealMarks.Count.ToString() & " nokta)." & vbCrLf & _
+            "Sealant gelen " & nf.ToString() & " yüz VURGULANDI." & vbCrLf & vbCrLf & _
+            "Tamam'a basınca yüz vurguları kalkar; kareler ekranda kalır." & vbCrLf & _
+            "Kareleri silmek için: F5 (Refresh).")
+        For Each ft As Tag In sealFaces.Keys
+            Try
+                ufs.Disp.SetHighlight(ft, 0)
+            Catch ex As Exception
+            End Try
+        Next
+    End Sub
+
     Sub WriteMassBlock(title As String, acc As Accum, kgPerM2 As Double, isInch As Boolean, u As String)
         Dim m2f As Double = If(isInch, 0.00064516, 0.000001)        ' alan birimi -> m²
         Dim k As Double = If(kgPerM2 > 0, kgPerM2, 1.0)
@@ -402,6 +480,11 @@ Module HizliSealant
             Dim mid() As Double = {(A.P(0) + B.P(0)) / 2, (A.P(1) + B.P(1)) / 2, (A.P(2) + B.P(2)) / 2}
             sealAcc.AddPt(mid, w)
             sealAcc.GapW += w * gap
+            Dim mk As New SealMark()
+            mk.C = mid : mk.Ax = ax : mk.Size = h
+            sealMarks.Add(mk)
+            If A.FaceTag <> Tag.Null Then sealFaces(A.FaceTag) = True
+            If B.FaceTag <> Tag.Null Then sealFaces(B.FaceTag) = True
             Dim compA As String = CompOf(A.Bd), compB As String = CompOf(B.Bd)
             Dim pk As String = If(String.Compare(compA, compB) <= 0, compA & "  <->  " & compB, compB & "  <->  " & compA)
             Dim pa As Accum = Nothing
