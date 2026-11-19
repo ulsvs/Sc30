@@ -37,6 +37,7 @@ Module HizliSealant
                                      "percin", "perçin", "rivet", "din912", "din933", "din931", "din934", "din125", _
                                      "din7991", "iso4762", "iso4017", "iso4014", "iso4032", "iso7089", "iso10642"}
     Const MAX_HITS As Integer = 2000
+    Dim COARSE_SEAL As Double = 20.0      ' Sealant kaba ön tarama aralığı (mm)
     Const MAX_VOXELS As Long = 20000000
     ' ---------------------------------------------------------------------------
 
@@ -113,7 +114,7 @@ Module HizliSealant
         Dim isInch As Boolean = (dispPart.PartUnits = BasePart.Units.Inches)
         Dim u As String = If(isInch, "in", "mm")
         If isInch Then
-            OUT_SPACING /= 25.4 : SEAL_SPACING /= 25.4 : GAP_TOL /= 25.4
+            OUT_SPACING /= 25.4 : SEAL_SPACING /= 25.4 : GAP_TOL /= 25.4 : COARSE_SEAL /= 25.4
             MIN_BODY_SIZE /= 25.4 : MERGE_TOL /= 25.4
         End If
 
@@ -253,59 +254,98 @@ Module HizliSealant
         lw.WriteLine("Sealant: birbirine yakın parça çifti = " & boxes.Count.ToString())
         If boxes.Count = 0 Then Return
 
-        ' 2) Her eksen için sadece bu kutulardan geçen ışın hatları
+        ' 2) KABA -> İNCE tarama
+        '    Önce ~COARSE_SEAL aralıklı kaba ışınlarla temas OLAN bölgeler bulunur,
+        '    sonra sadece bu bölgeler (ve komşuları) ince aralıkla taranır.
         Dim h As Double = SEAL_SPACING
+        Dim R As Integer = Math.Max(1, CInt(Math.Floor(COARSE_SEAL / h)))
         Dim jit As Double = h * 0.0173
-        Dim lines(2) As List(Of Double())
-        Dim nRays As Long = 0
+        Dim sw As Stopwatch = Stopwatch.StartNew()
+        Dim coarseTotal As Long = 0, fineTotal As Long = 0
+
         For ax As Integer = 0 To 2
             Dim a1 As Integer = If(ax = 0, 1, 0)
             Dim a2 As Integer = If(ax = 2, 1, 2)
             Dim n1 As Integer = CInt(Math.Ceiling((bbMax(a1) - bbMin(a1)) / h)) + 1
             Dim n2 As Integer = CInt(Math.Ceiling((bbMax(a2) - bbMin(a2)) / h)) + 1
-            Dim mark As New Dictionary(Of Long, Boolean)
-            lines(ax) = New List(Of Double())
+            Dim cn2 As Integer = (n2 + R - 1) \ R
+
+            ' Kutularla kesişen kaba hücreler
+            Dim cells As New Dictionary(Of Long, Boolean)
             For Each bx As Double() In boxes
                 Dim p1 As Integer = Math.Max(0, CInt(Math.Ceiling((bx(a1) - bbMin(a1)) / h - 0.5)))
                 Dim q1 As Integer = Math.Min(n1 - 1, CInt(Math.Floor((bx(a1 + 3) - bbMin(a1)) / h - 0.5)))
                 Dim p2 As Integer = Math.Max(0, CInt(Math.Ceiling((bx(a2) - bbMin(a2)) / h - 0.5)))
                 Dim q2 As Integer = Math.Min(n2 - 1, CInt(Math.Floor((bx(a2 + 3) - bbMin(a2)) / h - 0.5)))
-                For ii As Integer = p1 To q1
-                    For jj As Integer = p2 To q2
-                        Dim lineKey As Long = CLng(ii) * n2 + jj
-                        If Not mark.ContainsKey(lineKey) Then
-                            mark.Add(lineKey, True)
-                            lines(ax).Add(New Double() {bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit})
-                        End If
+                If p1 > q1 OrElse p2 > q2 Then Continue For
+                For ci As Integer = p1 \ R To q1 \ R
+                    For cj As Integer = p2 \ R To q2 \ R
+                        Dim ck As Long = CLng(ci) * cn2 + cj
+                        If Not cells.ContainsKey(ck) Then cells.Add(ck, True)
                     Next
                 Next
             Next
-            nRays += lines(ax).Count
-        Next
-        lw.WriteLine("Sealant: atılacak ışın sayısı = " & nRays.ToString())
-        If nRays = 0 Then
-            lw.WriteLine("UYARI: Sealant tarama aralığı birleşim bölgelerine göre çok büyük, hiç ışın düşmedi. Aralığı küçültün (örn. 5).")
-            Return
-        End If
 
-        ' 3) Işınları at ve üst üste gelen yüzeyleri topla
-        Dim done As Long = 0
-        Dim sw As Stopwatch = Stopwatch.StartNew()
-        For ax As Integer = 0 To 2
-            For Each ln As Double() In lines(ax)
-                Dim hits As List(Of Hit) = CastLine(ax, ln(0), ln(1), Nothing)
-                ProcessSeal(hits, ax, h)
-                done += 1
-                Progress("Sealant", done, nRays, sw)
+            ' Kaba tarama: her hücrenin ortasından tek ışın, temas var mı?
+            Dim active As New List(Of Long)
+            If R = 1 Then
+                active.AddRange(cells.Keys)
+            Else
+                Dim cDone As Long = 0
+                For Each ck As Long In cells.Keys
+                    Dim ci As Integer = CInt(ck \ cn2), cj As Integer = CInt(ck Mod cn2)
+                    Dim ii As Integer = Math.Min(n1 - 1, ci * R + R \ 2)
+                    Dim jj As Integer = Math.Min(n2 - 1, cj * R + R \ 2)
+                    Dim hits As List(Of Hit) = CastLine(ax, bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit, Nothing)
+                    If ProcessSeal(hits, ax, h, False) Then active.Add(ck)
+                    cDone += 1
+                    Progress("Sealant kaba tarama (eksen " & ax.ToString() & ")", cDone, cells.Count, sw)
+                Next
+                coarseTotal += cells.Count
+            End If
+
+            ' Aktif hücreler + komşuları -> ince ışın hatları
+            Dim fineLines As New Dictionary(Of Long, Boolean)
+            For Each ck As Long In active
+                Dim ci As Integer = CInt(ck \ cn2), cj As Integer = CInt(ck Mod cn2)
+                For di As Integer = -1 To 1
+                    For dj As Integer = -1 To 1
+                        If R = 1 AndAlso (di <> 0 OrElse dj <> 0) Then Continue For
+                        Dim ni As Integer = ci + di, nj As Integer = cj + dj
+                        If ni < 0 OrElse nj < 0 Then Continue For
+                        If Not cells.ContainsKey(CLng(ni) * cn2 + nj) Then Continue For
+                        For ii As Integer = ni * R To Math.Min(n1 - 1, ni * R + R - 1)
+                            For jj As Integer = nj * R To Math.Min(n2 - 1, nj * R + R - 1)
+                                Dim lk As Long = CLng(ii) * n2 + jj
+                                If Not fineLines.ContainsKey(lk) Then fineLines.Add(lk, True)
+                            Next
+                        Next
+                    Next
+                Next
             Next
+
+            ' İnce tarama ve toplama
+            Dim fDone As Long = 0
+            For Each lk As Long In fineLines.Keys
+                Dim ii As Integer = CInt(lk \ n2), jj As Integer = CInt(lk Mod n2)
+                Dim hits As List(Of Hit) = CastLine(ax, bbMin(a1) + (ii + 0.5) * h + jit, bbMin(a2) + (jj + 0.5) * h + jit, Nothing)
+                ProcessSeal(hits, ax, h, True)
+                fDone += 1
+                Progress("Sealant ince tarama (eksen " & ax.ToString() & ")", fDone, fineLines.Count, sw)
+            Next
+            fineTotal += fineLines.Count
         Next
+        lw.WriteLine("Sealant: kaba ışın = " & coarseTotal.ToString() & ", ince ışın = " & fineTotal.ToString() & _
+                     "  (kaba aralık " & F1(R * h) & ", ince aralık " & F1(h) & ")")
     End Sub
 
-    Sub ProcessSeal(hits As List(Of Hit), ax As Integer, h As Double)
+    ' doAccum = False: sadece temas var mı diye bakar (kaba tarama)
+    Function ProcessSeal(hits As List(Of Hit), ax As Integer, h As Double, doAccum As Boolean) As Boolean
+        Dim found As Boolean = False
         Dim m As Integer = hits.Count
         For k As Integer = 0 To m - 2
             Dim A As Hit = hits(k), B As Hit = hits(k + 1)
-            If B.IsEntry AndAlso A.InsAfter > 0 Then interfCount += 1
+            If doAccum AndAlso B.IsEntry AndAlso A.InsAfter > 0 Then interfCount += 1
             If A.IsEntry OrElse Not B.IsEntry Then Continue For   ' A'dan çıkış -> B'ye giriş olmalı
             If A.InsAfter <> 0 Then Continue For                  ' arası hava olmalı
             If A.Bd = B.Bd Then Continue For                      ' aynı parça değil
@@ -314,6 +354,8 @@ Module HizliSealant
             Dim gap As Double = (B.T - A.T) * na                  ' yüzeye dik boşluk
             If gap > GAP_TOL + MERGE_TOL Then Continue For
             If Math.Abs(Dot(A.Nrm, B.Nrm)) < COS_LIM Then Continue For
+            found = True
+            If Not doAccum Then Return True
             Dim w As Double = h * h / na
             Dim mid() As Double = {(A.P(0) + B.P(0)) / 2, (A.P(1) + B.P(1)) / 2, (A.P(2) + B.P(2)) / 2}
             sealAcc.AddPt(mid, w)
@@ -327,7 +369,8 @@ Module HizliSealant
             End If
             pa.AddPt(mid, w)
         Next
-    End Sub
+        Return found
+    End Function
 
     Function CompOf(t As Tag) As String
         Dim s As String = Nothing
