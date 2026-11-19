@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 ayarlar.toml
 karsilastirma_*.xlsx
+nx_sealant/test/bin/
+nx_sealant/test/obj/
