@@ -61,8 +61,10 @@ public class Settings
     public double FacetChordTol = 0.02; // mm  facet kiriş toleransı (eğrisel yüzey sadakati)   HIZLI: 0.05
     public int MaxThreads = 0;          // 0 = tüm çekirdekler (değiştirmeyin)
 
-    // --- Malzeme ---------------------------------------------------------------------
-    public double DensityGcm3 = 1.55;   // g/cm3  -> kullanılan sealant'ın TDS değerini girin
+    // --- Malzeme / ağırlık katsayısı -------------------------------------------------------
+    // Ağırlık = hacim [cm3] x DensityGcm3  -> gram.  Kullandığınız sealant'ın yoğunluğunu girin.
+    // Excel'de de B2 hücresine yazılır; orada değiştirirseniz ağırlık sütunu yeniden hesaplanır.
+    public double DensityGcm3 = 1.55;   // g/cm3  <<< KATSAYI
 
     // --- Hariç tutma (bağlantı bölgeleri) -------------------------------------------
     // Bileşen adı / part adı / gövde adı bu kelimelerden birini içerirse (Türkçe karakterler
@@ -85,17 +87,25 @@ public class Settings
 
     // --- Çıktılar --------------------------------------------------------------------
     public bool CreateCgPoint = true;    // CG'ye "SEALANT_CG" isimli nokta koy
-    public bool WriteCsv = true;         // parça çifti bazında CSV raporu (%TEMP%)
+    public bool WriteExcel = true;       // parça çifti bazında Excel (.xlsx) raporu
+    public string OutputFolder = "";     // Excel/STL klasörü; boş = Masaüstü
+    // Excel'deki "Parça No": önce part'ın bu attribute'u okunur (Teamcenter'da item ID),
+    // yoksa part adının "/" öncesi (ItemID/Rev -> ItemID) kullanılır.
+    public string PartNoAttribute = "DB_PART_NO";
     public bool PrePruneWithNxBox = true;// faceting öncesi NX bounding box ile eleme
 
     // --- NX'te gösterim ------------------------------------------------------------------
-    // Sealant atılan bölgeler, boşluğun orta düzleminde renkli facet nesneleri olarak montaj
-    // (work) part'ına eklenir: her parça çifti ayrı renk, adı SEALANT_001, SEALANT_002 ...
-    // Component part'lar DEĞİŞTİRİLMEZ. Makro tekrar çalışınca eski SEALANT_* nesneleri silinir.
+    // Sealant atılan bölgeler, boşluğun orta düzleminde FOSFOR YEŞİLİ facet nesneleri olarak
+    // montaj (work) part'ına eklenir: her parça çifti ayrı nesne, adı SEALANT_001, SEALANT_002 ...
+    // (Excel'deki "NX Nesnesi" sütunu ile aynı). Component part'lar DEĞİŞTİRİLMEZ.
+    // Makro tekrar çalışınca eski SEALANT_* nesneleri silinir.
     public bool ShowInNx = true;              // HIZLI: sadece ağırlık lazımsa false
+    // NX standart paletinde renk no = 1 + 36*(5-G) + 6*(5-R) + (5-B)   (R,G,B: 0..5 kademe)
+    // 30 = fosfor yeşili (R51 G255 B0), 36 = saf yeşil. Paletiniz farklıysa numarayı değiştirin.
+    public int SealantColor = 30;
     public int DisplayLayer = 251;            // sealant nesnelerinin layer'ı (aç/kapa için)
     public int MaxDisplayTriangles = 3000000; // bundan fazlaysa NX'te çizilmez, sadece STL yazılır  HIZLI: 1000000
-    public bool WriteStl = true;              // sealant bölgelerini STL olarak da kaydet (%TEMP%)
+    public bool WriteStl = true;              // sealant bölgelerini STL olarak da kaydet (OutputFolder)
 }
 
 // ------------------------------------------------------------------------------------
@@ -170,6 +180,7 @@ public enum BodyRole { Normal = 0, Excluded = 1, KeepOut = 2 }
 public sealed class BodyInfo
 {
     public string Name;              // rapor için (bileşen yolu / gövde)
+    public string PartNo = "";       // Excel için parça numarası
     public BodyRole Role;
     public int TriStart, TriCount;
     public V3 Min = new V3(double.MaxValue, double.MaxValue, double.MaxValue);
@@ -234,6 +245,7 @@ public sealed class Grid
 public sealed class Acc
 {
     public double Area, Vol, Sx, Sy, Sz, Sxx, Syy, Szz, Sxy, Sxz, Syz; public long Samples;
+    public double FayArea;   // bu alanın temas eden (faying) kısmı
     public void AddPoint(double dA, double dV, V3 c)
     {
         Area += dA; Vol += dV; Samples++;
@@ -243,7 +255,7 @@ public sealed class Acc
     }
     public void Merge(Acc o)
     {
-        Area += o.Area; Vol += o.Vol; Samples += o.Samples; Sx += o.Sx; Sy += o.Sy; Sz += o.Sz;
+        Area += o.Area; Vol += o.Vol; Samples += o.Samples; FayArea += o.FayArea; Sx += o.Sx; Sy += o.Sy; Sz += o.Sz;
         Sxx += o.Sxx; Syy += o.Syy; Szz += o.Szz; Sxy += o.Sxy; Sxz += o.Sxz; Syz += o.Syz;
     }
     public V3 Cg() { return Vol > 0 ? new V3(Sx / Vol, Sy / Vol, Sz / Vol) : new V3(0, 0, 0); }
@@ -533,6 +545,7 @@ public static class SealantSolver
         long key = Key(A, bestBody);
         Acc pa; if (!w.Pairs.TryGetValue(key, out pa)) { pa = new Acc(); w.Pairs[key] = pa; }
         pa.AddPoint(dA, dV, mid);
+        if (faying) { pa.FayArea += dA; w.Faying.FayArea += dA; }
         return true;
     }
 
@@ -652,19 +665,53 @@ public static class Report
         return list;
     }
 
-    public static string Csv(SealantResult r, List<BodyInfo> bodies, double outScale)
+    /// Parça çifti bazında Excel raporu. Ağırlık sütunu formüldür: Hacim x B2 (yoğunluk).
+    public static void WriteExcel(string path, SealantResult r, List<BodyInfo> bodies, Settings cfg,
+                                  double outScale, string unitName, string title, bool nxNames)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("Govde A;Govde B;Alan [cm2];Hacim [cm3];Ortalama bosluk [mm];Agirlik [g];CG X;CG Y;CG Z");
-        foreach (var kv in SortedPairs(r))
+        var pairs = SortedPairs(r);
+        const int H = 6;                         // başlık satırı
+        int first = H + 1, last = Math.Max(first, H + pairs.Count);
+        string u = "[" + unitName + "]";
+        var x = new XlsxSheet();
+        x.Text(1, 1, "SEALANT RAPORU", 4); x.Text(1, 2, title, 4);
+        x.Text(2, 1, "Yoğunluk katsayısı [g/cm³]", 4); x.Num(2, 2, cfg.DensityGcm3, 3);
+        x.Text(2, 3, "<- değiştirirseniz ağırlıklar yeniden hesaplanır", 0);
+        x.Text(3, 1, "Toplam ağırlık [g]", 4); x.Formula(3, 2, string.Format("SUM(G{0}:G{1})", first, last), 5);
+        x.Text(4, 1, "Toplam alan [cm²]", 4); x.Formula(4, 2, string.Format("SUM(C{0}:C{1})", first, last), 5);
+        x.Text(5, 1, "Toplam CG X / Y / Z " + u, 4);
+        for (int k = 0; k < 3; k++)
         {
-            int a = (int)(kv.Key >> 32), b = (int)(kv.Key & 0xffffffffL); Acc p = kv.Value; V3 c = p.Cg() * (1.0 / outScale);
-            sb.AppendLine(string.Join(";", new string[] {
-                bodies[a].Name, bodies[b].Name, Fmt(p.Area / 100, 3), Fmt(p.Vol / 1000, 4), Fmt(p.Vol / Math.Max(p.Area, 1e-12), 3),
-                Fmt(p.Vol * r.DensityGcm3 * 1e-3, 3), Fmt(c.X, 3), Fmt(c.Y, 3), Fmt(c.Z, 3) }));
+            string col = new string[] { "D", "E", "F" }[k];
+            x.Formula(5, 2 + k, string.Format("IF($B$3=0,0,SUMPRODUCT({0}{1}:{0}{2},$G${1}:$G${2})/$B$3)", col, first, last), 3);
         }
-        return sb.ToString();
+        string[] head = { "Parça No 1", "Parça No 2", "Yüzey Alanı [cm²]", "CGx " + u, "CGy " + u, "CGz " + u,
+                          "Sealant Ağırlık [g]", "Hacim [cm³]", "Ort. Kalınlık [mm]", "Temas (faying) Alanı [cm²]",
+                          "NX Nesnesi", "Bileşen 1 (montaj yolu)", "Bileşen 2 (montaj yolu)" };
+        for (int k = 0; k < head.Length; k++) x.Text(H, k + 1, head[k], 1);
+        int row = H;
+        for (int i = 0; i < pairs.Count; i++)
+        {
+            row++;
+            int a = (int)(pairs[i].Key >> 32), b = (int)(pairs[i].Key & 0xffffffffL);
+            Acc p = pairs[i].Value; V3 c = p.Cg() * (1.0 / outScale);
+            x.Text(row, 1, bodies[a].PartNo, 0); x.Text(row, 2, bodies[b].PartNo, 0);
+            x.Num(row, 3, p.Area / 100.0, 2);
+            x.Num(row, 4, c.X, 3); x.Num(row, 5, c.Y, 3); x.Num(row, 6, c.Z, 3);
+            x.Formula(row, 7, string.Format("H{0}*$B$2", row), 2);
+            x.Num(row, 8, p.Vol / 1000.0, 3);
+            x.Num(row, 9, p.Vol / Math.Max(p.Area, 1e-12), 3);
+            x.Num(row, 10, p.FayArea / 100.0, 2);
+            x.Text(row, 11, nxNames ? PairObjectName(i) : "", 0);
+            x.Text(row, 12, bodies[a].Name, 0); x.Text(row, 13, bodies[b].Name, 0);
+        }
+        x.Widths = new double[] { 20, 20, 16, 13, 13, 13, 18, 13, 16, 22, 14, 60, 60 };
+        x.FreezeRows = H; x.FilterRef = string.Format("A{0}:M{1}", H, Math.Max(H + 1, row));
+        x.Save(path, "Sealant");
     }
+
+    /// Montajdaki gösterim nesnesinin adı (SortedPairs sırasıyla)
+    public static string PairObjectName(int index0) { return "SEALANT_" + (index0 + 1).ToString("000"); }
 
     /// Gösterim üçgenlerini binary STL olarak yazar (birim: mm)
     public static void WriteStl(string path, SealantResult r)
@@ -724,6 +771,171 @@ public static class Report
         string t = Norm(text);
         foreach (string k in prefixes) if (k.Length > 0 && t.StartsWith(Norm(k), StringComparison.Ordinal)) return true;
         return false;
+    }
+}
+
+// ------------------------------------------------------------------------------------
+//  Minimal .xlsx yazıcı: Excel'e veya ek kütüphaneye (System.IO.Compression dahil) gerek yok.
+//  Zip "store" (sıkıştırmasız) + elle CRC32. Formüller dosya açılınca hesaplanır.
+// ------------------------------------------------------------------------------------
+public sealed class XlsxSheet
+{
+    // stil: 0 normal, 1 başlık (kalın + yeşil zemin), 2 "0.00", 3 "0.000", 4 kalın, 5 kalın "0.00"
+    readonly SortedDictionary<int, SortedDictionary<int, string>> rows = new SortedDictionary<int, SortedDictionary<int, string>>();
+    public double[] Widths; public int FreezeRows; public string FilterRef;
+
+    static string Col(int c) { string s = ""; while (c > 0) { int m = (c - 1) % 26; s = (char)('A' + m) + s; c = (c - 1) / 26; } return s; }
+    static string Esc(string t)
+    {
+        if (t == null) return "";
+        var sb = new StringBuilder(t.Length);
+        foreach (char ch in t)
+        {
+            if (ch == '&') sb.Append("&amp;"); else if (ch == '<') sb.Append("&lt;"); else if (ch == '>') sb.Append("&gt;");
+            else if (ch == '"') sb.Append("&quot;"); else if (ch < 0x20 && ch != '\t' && ch != '\n' && ch != '\r') sb.Append(' ');
+            else sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+    void Put(int r, int c, string xml)
+    {
+        SortedDictionary<int, string> row;
+        if (!rows.TryGetValue(r, out row)) { row = new SortedDictionary<int, string>(); rows[r] = row; }
+        row[c] = xml;
+    }
+    public void Text(int r, int c, string t, int style)
+    {
+        Put(r, c, string.Format("<c r=\"{0}{1}\" t=\"inlineStr\" s=\"{2}\"><is><t xml:space=\"preserve\">{3}</t></is></c>", Col(c), r, style, Esc(t)));
+    }
+    public void Num(int r, int c, double v, int style)
+    {
+        if (double.IsNaN(v) || double.IsInfinity(v)) v = 0;
+        Put(r, c, string.Format("<c r=\"{0}{1}\" s=\"{2}\"><v>{3}</v></c>", Col(c), r, style, v.ToString("R", CultureInfo.InvariantCulture)));
+    }
+    public void Formula(int r, int c, string f, int style)
+    {
+        Put(r, c, string.Format("<c r=\"{0}{1}\" s=\"{2}\"><f>{3}</f></c>", Col(c), r, style, Esc(f)));
+    }
+
+    public void Save(string path, string sheetName)
+    {
+        var sheet = new StringBuilder();
+        sheet.Append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
+        sheet.Append("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">");
+        sheet.Append("<sheetViews><sheetView workbookViewId=\"0\">");
+        if (FreezeRows > 0) sheet.AppendFormat("<pane ySplit=\"{0}\" topLeftCell=\"A{1}\" activePane=\"bottomLeft\" state=\"frozen\"/>", FreezeRows, FreezeRows + 1);
+        sheet.Append("</sheetView></sheetViews>");
+        if (Widths != null && Widths.Length > 0)
+        {
+            sheet.Append("<cols>");
+            for (int i = 0; i < Widths.Length; i++)
+                sheet.AppendFormat(CultureInfo.InvariantCulture, "<col min=\"{0}\" max=\"{0}\" width=\"{1}\" customWidth=\"1\"/>", i + 1, Widths[i]);
+            sheet.Append("</cols>");
+        }
+        sheet.Append("<sheetData>");
+        foreach (var r in rows)
+        {
+            sheet.AppendFormat("<row r=\"{0}\">", r.Key);
+            foreach (var c in r.Value) sheet.Append(c.Value);
+            sheet.Append("</row>");
+        }
+        sheet.Append("</sheetData>");
+        if (!string.IsNullOrEmpty(FilterRef)) sheet.AppendFormat("<autoFilter ref=\"{0}\"/>", FilterRef);
+        sheet.Append("</worksheet>");
+
+        string sn = Esc(sheetName);
+        string defName = string.IsNullOrEmpty(FilterRef) ? "" :
+            "<definedNames><definedName name=\"_xlnm._FilterDatabase\" localSheetId=\"0\" hidden=\"1\">'" + sn + "'!" + AbsRef(FilterRef) + "</definedName></definedNames>";
+        var files = new List<KeyValuePair<string, string>>();
+        files.Add(new KeyValuePair<string, string>("[Content_Types].xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+            "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" +
+            "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>" +
+            "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/></Types>"));
+        files.Add(new KeyValuePair<string, string>("_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>"));
+        files.Add(new KeyValuePair<string, string>("xl/workbook.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+            "<sheets><sheet name=\"" + sn + "\" sheetId=\"1\" r:id=\"rId1\"/></sheets>" + defName + "<calcPr calcId=\"0\" fullCalcOnLoad=\"1\"/></workbook>"));
+        files.Add(new KeyValuePair<string, string>("xl/_rels/workbook.xml.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>" +
+            "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>"));
+        files.Add(new KeyValuePair<string, string>("xl/styles.xml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+            "<numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"0.000\"/><numFmt numFmtId=\"165\" formatCode=\"0.00\"/></numFmts>" +
+            "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>" +
+            "<fills count=\"3\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill>" +
+            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF39FF14\"/><bgColor indexed=\"64\"/></patternFill></fill></fills>" +
+            "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" +
+            "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
+            "<cellXfs count=\"6\">" +
+            "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" +
+            "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\"/>" +
+            "<xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>" +
+            "<xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/>" +
+            "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>" +
+            "<xf numFmtId=\"165\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" applyNumberFormat=\"1\"/>" +
+            "</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>"));
+        files.Add(new KeyValuePair<string, string>("xl/worksheets/sheet1.xml", sheet.ToString()));
+        File.WriteAllBytes(path, Zip(files));
+    }
+
+    static string AbsRef(string r)   // "A6:M20" -> "$A$6:$M$20"
+    {
+        var sb = new StringBuilder();
+        bool prevLetter = false;
+        foreach (char ch in r)
+        {
+            if (char.IsLetter(ch) && !prevLetter) sb.Append('$');
+            if (char.IsDigit(ch) && prevLetter) sb.Append('$');
+            sb.Append(ch); prevLetter = char.IsLetter(ch);
+        }
+        return sb.ToString();
+    }
+
+    static uint[] crcTable;
+    static uint Crc32(byte[] data)
+    {
+        if (crcTable == null)
+        {
+            var t = new uint[256];
+            for (uint i = 0; i < 256; i++) { uint c = i; for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1; t[i] = c; }
+            crcTable = t;
+        }
+        uint crc = 0xFFFFFFFFu;
+        foreach (byte b in data) crc = crcTable[(crc ^ b) & 0xFF] ^ (crc >> 8);
+        return crc ^ 0xFFFFFFFFu;
+    }
+
+    static byte[] Zip(List<KeyValuePair<string, string>> files)
+    {
+        var ms = new MemoryStream(); var bw = new BinaryWriter(ms);
+        var central = new MemoryStream(); var cw = new BinaryWriter(central);
+        DateTime now = DateTime.Now;
+        ushort dosTime = (ushort)((now.Hour << 11) | (now.Minute << 5) | (now.Second / 2));
+        ushort dosDate = (ushort)(((now.Year - 1980) << 9) | (now.Month << 5) | now.Day);
+        foreach (var f in files)
+        {
+            byte[] name = Encoding.UTF8.GetBytes(f.Key), data = new UTF8Encoding(false).GetBytes(f.Value);
+            uint crc = Crc32(data); uint offset = (uint)ms.Position;
+            bw.Write(0x04034b50u); bw.Write((ushort)20); bw.Write((ushort)0); bw.Write((ushort)0);
+            bw.Write(dosTime); bw.Write(dosDate); bw.Write(crc); bw.Write((uint)data.Length); bw.Write((uint)data.Length);
+            bw.Write((ushort)name.Length); bw.Write((ushort)0); bw.Write(name); bw.Write(data);
+            cw.Write(0x02014b50u); cw.Write((ushort)20); cw.Write((ushort)20); cw.Write((ushort)0); cw.Write((ushort)0);
+            cw.Write(dosTime); cw.Write(dosDate); cw.Write(crc); cw.Write((uint)data.Length); cw.Write((uint)data.Length);
+            cw.Write((ushort)name.Length); cw.Write((ushort)0); cw.Write((ushort)0); cw.Write((ushort)0); cw.Write((ushort)0);
+            cw.Write(0u); cw.Write(offset); cw.Write(name);
+        }
+        cw.Flush();
+        uint cdOffset = (uint)ms.Position; byte[] cd = central.ToArray();
+        bw.Write(cd);
+        bw.Write(0x06054b50u); bw.Write((ushort)0); bw.Write((ushort)0); bw.Write((ushort)files.Count); bw.Write((ushort)files.Count);
+        bw.Write((uint)cd.Length); bw.Write(cdOffset); bw.Write((ushort)0);
+        bw.Flush();
+        return ms.ToArray();
     }
 }
 
@@ -792,7 +1004,7 @@ public class SealantCG
                 {
                     mesh = Facet(it.Proto.Tag, it.ProtoToMm, cfg); cache[it.Proto.Tag] = mesh;
                 }
-                var bi = new BodyInfo(); bi.Name = it.Name; bi.Role = it.Role; bi.TriStart = soup.Count;
+                var bi = new BodyInfo(); bi.Name = it.Name; bi.PartNo = it.PartNo; bi.Role = it.Role; bi.TriStart = soup.Count;
                 AppendTransformed(soup, mesh, xf, bodies.Count);
                 bi.TriCount = soup.Count - bi.TriStart;
                 for (int t = bi.TriStart; t < soup.Count; t++)
@@ -825,15 +1037,19 @@ public class SealantCG
             lw.WriteLine(string.Format("  {0,9} g  {1}  <->  {2}", Report.Fmt(kv.Value.Vol * cfg.DensityGcm3 * 1e-3, 2), bodies[a].Name, bodies[b].Name));
         }
 
-        if (cfg.WriteCsv && r.Pairs.Count > 0)
+        string stamp = SafeName(work.Leaf) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        string outDir = OutDir(cfg);
+        long nDisp = r.DisplayTriangleCount();
+        bool willShow = cfg.ShowInNx && nDisp > 0 && nDisp <= cfg.MaxDisplayTriangles;
+        if (cfg.WriteExcel)
         {
             try
             {
-                string path = Path.Combine(Path.GetTempPath(), "sealant_" + SafeName(work.Leaf) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
-                File.WriteAllText(path, Report.Csv(r, bodies, workToMm), new UTF8Encoding(true));
-                lw.WriteLine("CSV raporu: " + path);
+                string xlsx = Path.Combine(outDir, "sealant_" + stamp + ".xlsx");
+                Report.WriteExcel(xlsx, r, bodies, cfg, workToMm, unitName, work.Leaf, willShow);
+                lw.WriteLine("EXCEL raporu: " + xlsx);
             }
-            catch (Exception ex) { lw.WriteLine("CSV yazılamadı: " + ex.Message); }
+            catch (Exception ex) { lw.WriteLine("Excel yazılamadı: " + ex.Message); }
         }
         if (cfg.CreateCgPoint && r.Total.Vol > 0)
         {
@@ -847,13 +1063,11 @@ public class SealantCG
             }
             catch (Exception ex) { lw.WriteLine("CG noktası oluşturulamadı: " + ex.Message); }
         }
-        string stamp = SafeName(work.Leaf) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        long nDisp = r.DisplayTriangleCount();
         if (cfg.WriteStl && nDisp > 0)
         {
             try
             {
-                string stl = Path.Combine(Path.GetTempPath(), "sealant_" + stamp + ".stl");
+                string stl = Path.Combine(outDir, "sealant_" + stamp + ".stl");
                 Report.WriteStl(stl, r);
                 lw.WriteLine("STL (mm): " + stl + "   -> gerekirse File > Import > STL ile açılabilir");
             }
@@ -868,17 +1082,23 @@ public class SealantCG
                 uf.Ui.SetStatus("Sealant: NX'te gösteriliyor...");
                 sw.Restart();
                 ShowRegions(work, r, bodies, cfg, workToMm);
-                lw.WriteLine(string.Format("Gösterim: {0} üçgen, {1} nesne, layer {2}  ({3:F1} s)  - geri almak için Ctrl+Z",
-                    nDisp, r.Display.Count, cfg.DisplayLayer, sw.Elapsed.TotalSeconds));
+                lw.WriteLine(string.Format("Gösterim: {0} üçgen, {1} nesne, renk {2} (fosfor yeşili), layer {3}  ({4:F1} s)  - geri almak için Ctrl+Z",
+                    nDisp, r.Display.Count, cfg.SealantColor, cfg.DisplayLayer, sw.Elapsed.TotalSeconds));
+                lw.WriteLine("Görmek için: parçaları gizleyin veya saydam yapın (sealant parçaların arasındaki boşlukta durur).");
             }
         }
         uf.Ui.SetStatus("Sealant: tamamlandı");
     }
 
-    // NX renk paletinden belirgin renkler (kırmızı, turuncu, sarı, yeşil, camgöbeği, mavi, mor, pembe ...)
-    static readonly int[] Palette = new int[] { 186, 78, 6, 36, 103, 211, 181, 151, 25, 120, 160, 55 };
+    static string OutDir(Settings cfg)
+    {
+        string d = cfg.OutputFolder;
+        if (string.IsNullOrEmpty(d)) { try { d = Environment.GetFolderPath(Environment.SpecialFolder.Desktop); } catch { d = ""; } }
+        if (string.IsNullOrEmpty(d) || !Directory.Exists(d)) d = Path.GetTempPath();
+        return d;
+    }
 
-    /// Her parça çifti için bir facet nesnesi: renkli, isimli, ayrı layer'da. Tek undo adımı.
+    /// Her parça çifti için bir facet nesnesi: fosfor yeşili, isimli, ayrı layer'da. Tek undo adımı.
     static void ShowRegions(Part work, SealantResult r, List<BodyInfo> bodies, Settings cfg, double workToMm)
     {
         theSession.SetUndoMark(Session.MarkVisibility.Visible, "Sealant gösterimi");
@@ -886,15 +1106,15 @@ public class SealantCG
         double inv = 1.0 / workToMm;
         double[,] v = new double[3, 3], nn = new double[3, 3];
         int[] adj = new int[] { UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID };
-        int idx = 0;
-        lw.WriteLine("---- Gösterim nesneleri (renk = parça çifti) ----");
+        int idx = -1;
+        int color = cfg.SealantColor;
+        lw.WriteLine("---- Gösterim nesneleri (Excel'deki 'NX Nesnesi' sütunu ile aynı) ----");
         foreach (var kv in Report.SortedPairs(r))
         {
+            idx++;
             List<float> d;
             if (!r.Display.TryGetValue(kv.Key, out d) || d.Count < 9) continue;
-            idx++;
-            string name = "SEALANT_" + idx.ToString("000");
-            int color = Palette[(idx - 1) % Palette.Length];
+            string name = Report.PairObjectName(idx);
             try
             {
                 Tag model;
@@ -916,8 +1136,8 @@ public class SealantCG
                 uf.Obj.SetLayer(model, cfg.DisplayLayer);
                 try { uf.Disp.AddItemToDisplay(model); } catch { }
                 int a2 = (int)(kv.Key >> 32), b2 = (int)(kv.Key & 0xffffffffL);
-                lw.WriteLine(string.Format("  {0}  renk {1,3}  {2,9} g  {3}  <->  {4}", name, color,
-                    Report.Fmt(kv.Value.Vol * cfg.DensityGcm3 * 1e-3, 2), bodies[a2].Name, bodies[b2].Name));
+                lw.WriteLine(string.Format("  {0}  {1,9} g  {2}  <->  {3}", name,
+                    Report.Fmt(kv.Value.Vol * cfg.DensityGcm3 * 1e-3, 2), bodies[a2].PartNo, bodies[b2].PartNo));
             }
             catch (Exception ex) { lw.WriteLine("  " + name + " oluşturulamadı: " + ex.Message); }
         }
@@ -949,7 +1169,7 @@ public class SealantCG
     // ------------------------------------------------------------------------------------
     sealed class BodyItem
     {
-        public Body Occ, Proto; public Component Comp; public string Name; public BodyRole Role;
+        public Body Occ, Proto; public Component Comp; public string Name; public string PartNo; public BodyRole Role;
         public double ProtoToMm = 1.0; public bool Pruned;
     }
 
@@ -996,7 +1216,29 @@ public class SealantCG
         it.ProtoToMm = protoPart.PartUnits == BasePart.Units.Inches ? 25.4 : 1.0;
         string bn = string.IsNullOrEmpty(proto.Name) ? proto.JournalIdentifier : proto.Name;
         it.Name = (c != null ? CompPath(c) : "<root>") + "/" + bn;
+        it.PartNo = PartNo(protoPart, cfg);
         items.Add(it);
+    }
+
+    /// Parça numarası: önce PartNoAttribute (Teamcenter: DB_PART_NO), yoksa part adının "/" öncesi
+    static string PartNo(Part p, Settings cfg)
+    {
+        if (p == null) return "";
+        if (!string.IsNullOrEmpty(cfg.PartNoAttribute))
+        {
+            try
+            {
+                if (p.HasUserAttribute(cfg.PartNoAttribute, NXObject.AttributeType.String, -1))
+                {
+                    string v = p.GetUserAttributeAsString(cfg.PartNoAttribute, NXObject.AttributeType.String, -1);
+                    if (!string.IsNullOrEmpty(v)) return v.Trim();
+                }
+            }
+            catch { }
+        }
+        string leaf = p.Leaf ?? "";
+        int k = leaf.IndexOf('/');
+        return k > 0 ? leaf.Substring(0, k) : leaf;
     }
 
     static string CompPath(Component c)

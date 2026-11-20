@@ -106,6 +106,13 @@ public static class Program
             double z0, z1;
             Check("3 gösterim alanı = sealant alanı", DispArea(r, out z0, out z1), r.Total.Area, 0.001);
             Check("3 gösterim nesnesi sayısı", r.Display.Count, 1, 0);
+            // Excel: 3 normal gövde -> 2 çift (A-B boşluk, A-C faying) olacak şekilde C ekle
+            AddBox(s, b, "C", BodyRole.Normal, 0, 0, -2, 40, 100, 0);
+            b[0].PartNo = "D5212345-1"; b[1].PartNo = "D5267890-3"; b[2].PartNo = "NAS1149 & <özel>"; b[3].PartNo = "D52TAB";
+            var rx = SealantSolver.Run(s, b, cfg);
+            string xl = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "sealant_test.xlsx");
+            Report.WriteExcel(xl, rx, b, cfg, 1.0, "mm", "TEST_ASSY/A", true);
+            Console.WriteLine("     excel: " + xl + "  çift sayısı " + rx.Pairs.Count + "  toplam g " + (rx.Total.Vol * cfg.DensityGcm3 * 1e-3).ToString("F4"));
         }
         // 4) Keep-out gövdesi
         {
