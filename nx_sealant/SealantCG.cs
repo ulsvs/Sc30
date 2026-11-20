@@ -781,7 +781,8 @@ public static class Report
 public sealed class XlsxSheet
 {
     // stil: 0 normal, 1 başlık (kalın + yeşil zemin), 2 "0.00", 3 "0.000", 4 kalın, 5 kalın "0.00"
-    readonly SortedDictionary<int, SortedDictionary<int, string>> rows = new SortedDictionary<int, SortedDictionary<int, string>>();
+    // Not: SortedDictionary bazı NX sürümlerinin journal derleyicisinde yok -> Dictionary + sıralama
+    readonly Dictionary<int, Dictionary<int, string>> rows = new Dictionary<int, Dictionary<int, string>>();
     public double[] Widths; public int FreezeRows; public string FilterRef;
 
     static string Col(int c) { string s = ""; while (c > 0) { int m = (c - 1) % 26; s = (char)('A' + m) + s; c = (c - 1) / 26; } return s; }
@@ -799,8 +800,8 @@ public sealed class XlsxSheet
     }
     void Put(int r, int c, string xml)
     {
-        SortedDictionary<int, string> row;
-        if (!rows.TryGetValue(r, out row)) { row = new SortedDictionary<int, string>(); rows[r] = row; }
+        Dictionary<int, string> row;
+        if (!rows.TryGetValue(r, out row)) { row = new Dictionary<int, string>(); rows[r] = row; }
         row[c] = xml;
     }
     public void Text(int r, int c, string t, int style)
@@ -833,10 +834,13 @@ public sealed class XlsxSheet
             sheet.Append("</cols>");
         }
         sheet.Append("<sheetData>");
-        foreach (var r in rows)
+        var rowKeys = new List<int>(rows.Keys); rowKeys.Sort();
+        foreach (int rk in rowKeys)
         {
-            sheet.AppendFormat("<row r=\"{0}\">", r.Key);
-            foreach (var c in r.Value) sheet.Append(c.Value);
+            Dictionary<int, string> row = rows[rk];
+            var colKeys = new List<int>(row.Keys); colKeys.Sort();
+            sheet.AppendFormat("<row r=\"{0}\">", rk);
+            foreach (int ck in colKeys) sheet.Append(row[ck]);
             sheet.Append("</row>");
         }
         sheet.Append("</sheetData>");
