@@ -30,16 +30,36 @@ using NXOpen.Assemblies;
 // ------------------------------------------------------------------------------------
 public class Settings
 {
+    // =================================================================================
+    //  HIZLI ÇALIŞMA İÇİN ÖNERİLER  (satır sonlarındaki "HIZLI:" notlarına bakın)
+    //    SampleSize    1.0  -> 2.0    hesap ~4 kat hızlanır, hacim çok az değişir   (en etkili)
+    //    FacetChordTol 0.02 -> 0.05   eğrisel yüzeylerde daha az üçgen, facet hızlanır
+    //    FacetSize     8    -> 15     büyük düz yüzeylerde daha az üçgen
+    //    ExcludeMargin 10   -> 3      çok bağlantı elemanı varsa hesap hızlanır
+    //    MaxGap        gereğinden büyük tutmayın
+    //    ShowInNx      sadece ağırlık lazımsa false (NX'te nesne oluşturma atlanır)
+    //    MaxDisplayTriangles 3000000 -> 1000000   NX'in ağırlaşmasını önler
+    //  Değiştirmeyin: MaxThreads = 0, PrePruneWithNxBox = true
+    //  Ayrıca montajı partial load yerine tam yüklenmiş açmak facet adımını hızlandırır.
+    // =================================================================================
+
     // --- Boşluk tanımı -------------------------------------------------------------
-    public double MinGap = 0.10;        // mm  bundan küçük boşluk = temas (sealant yok)
+    public double MinGap = 0.10;        // mm  bundan küçük boşluk = temas (faying, aşağıya bakın)
     public double MaxGap = 3.00;        // mm  bundan büyük açıklık sealant ile doldurulmaz
     public double MaxAngleDeg = 25.0;   // iki yüzey birbirine bu açıdan daha paralelse "karşılıklı"
 
+    // --- Temas eden yüzeyler (faying surface sealant) -----------------------------------
+    // Birbirine değen (boşluğu MinGap'ten küçük) karşılıklı yüzeylere FayingThickness
+    // kalınlığında sealant tabakası sayılır. Bağlantı elemanı / emniyet payı / keep-out
+    // kuralları burada da geçerlidir. Raporda boşluk sealant'ından ayrı yazılır.
+    public bool IncludeFaying = true;
+    public double FayingThickness = 0.10; // mm  -> proses spesifikasyonunuzdaki film kalınlığını girin
+
     // --- Çözünürlük / hız ------------------------------------------------------------
-    public double SampleSize = 1.0;     // mm  örnekleme aralığı (küçük = hassas, yavaş)
-    public double FacetSize = 8.0;      // mm  facet üçgenlerinin en uzun kenarı (üstü bölünür)
-    public double FacetChordTol = 0.02; // mm  facet kiriş toleransı (eğrisel yüzey sadakati)
-    public int MaxThreads = 0;          // 0 = tüm çekirdekler
+    public double SampleSize = 1.0;     // mm  örnekleme aralığı (küçük = hassas, yavaş)      HIZLI: 2.0
+    public double FacetSize = 8.0;      // mm  facet üçgenlerinin en uzun kenarı                HIZLI: 15
+    public double FacetChordTol = 0.02; // mm  facet kiriş toleransı (eğrisel yüzey sadakati)   HIZLI: 0.05
+    public int MaxThreads = 0;          // 0 = tüm çekirdekler (değiştirmeyin)
 
     // --- Malzeme ---------------------------------------------------------------------
     public double DensityGcm3 = 1.55;   // g/cm3  -> kullanılan sealant'ın TDS değerini girin
@@ -55,7 +75,7 @@ public class Settings
     // Adı bu metinlerden biriyle BAŞLAYAN bileşen/part/gövde hariç tutulur (ör. parça numarası ön eki)
     public string[] ExcludePrefixes = new string[] { };
     public string ExcludeAttribute = "SEALANT_EXCLUDE"; // bu attribute'u olan bileşen/part hariç
-    public double ExcludeMargin = 10.0;  // mm  hariç parçaların çevresindeki sealant'sız bölge
+    public double ExcludeMargin = 10.0;  // mm  hariç parçaların çevresindeki sealant'sız bölge  HIZLI: 3
     public bool AskUserSelection = true; // çalışırken ek hariç parça/gövde seçtir
 
     // Keep-out gövdeleri: kullanıcı tarafından modellenen basit "yasak hacim" solidleri.
@@ -72,9 +92,9 @@ public class Settings
     // Sealant atılan bölgeler, boşluğun orta düzleminde renkli facet nesneleri olarak montaj
     // (work) part'ına eklenir: her parça çifti ayrı renk, adı SEALANT_001, SEALANT_002 ...
     // Component part'lar DEĞİŞTİRİLMEZ. Makro tekrar çalışınca eski SEALANT_* nesneleri silinir.
-    public bool ShowInNx = true;
+    public bool ShowInNx = true;              // HIZLI: sadece ağırlık lazımsa false
     public int DisplayLayer = 251;            // sealant nesnelerinin layer'ı (aç/kapa için)
-    public int MaxDisplayTriangles = 3000000; // bundan fazlaysa NX'te çizilmez, sadece STL yazılır
+    public int MaxDisplayTriangles = 3000000; // bundan fazlaysa NX'te çizilmez, sadece STL yazılır  HIZLI: 1000000
     public bool WriteStl = true;              // sealant bölgelerini STL olarak da kaydet (%TEMP%)
 }
 
@@ -232,6 +252,7 @@ public sealed class Acc
 public sealed class SealantResult
 {
     public Acc Total = new Acc();
+    public Acc Faying = new Acc();     // Total'ın temas eden yüzeylerden gelen kısmı
     public Dictionary<long, Acc> Pairs = new Dictionary<long, Acc>();   // (A<<32)|B
     public double DensityGcm3;
     public int Bodies, ActiveBodies, Triangles, CandidateTriangles;
@@ -360,6 +381,7 @@ public static class SealantSolver
         foreach (Worker w in workers)
         {
             res.Total.Merge(w.Total);
+            res.Faying.Merge(w.Faying);
             foreach (var kv in w.Pairs)
             {
                 Acc a; if (!res.Pairs.TryGetValue(kv.Key, out a)) { a = new Acc(); res.Pairs[kv.Key] = a; }
@@ -377,6 +399,7 @@ public static class SealantSolver
     sealed class Worker
     {
         public Acc Total = new Acc();
+        public Acc Faying = new Acc();
         public Dictionary<long, Acc> Pairs = new Dictionary<long, Acc>();
         public HashSet<int> Set = new HashSet<int>();
         public List<int> Hits = new List<int>();
@@ -488,13 +511,15 @@ public static class SealantSolver
             if (RayTri(o, n, s.A(k), s.B(k), s.C(k), out t) && t >= 0 && t < best) { best = t; bestBody = s.Body[k]; }
         }
         if (bestBody < 0) return false;
-        gap = best - Eps;
-        if (gap > cfg.MaxGap) return false;            // açıklık çok büyük
-        if (gap < cfg.MinGap) return false;            // temas: sealant yok
+        double realGap = best - Eps;
+        if (realGap > cfg.MaxGap) return false;        // açıklık çok büyük
+        bool faying = realGap < cfg.MinGap;            // temas eden yüzeyler
+        if (faying && !(cfg.IncludeFaying && cfg.FayingThickness > 0)) return false;
         if (bestBody < A) return false;                // çift sayımı önle: hacmi küçük indeksli gövde sayar
         if (role[bestBody] != BodyRole.Normal) return false;   // menteşe/cıvata ile arasındaki boşluk
+        gap = faying ? cfg.FayingThickness : realGap;  // sayılan sealant kalınlığı
 
-        V3 mid = p + n * (0.5 * gap);
+        V3 mid = p + n * (0.5 * Math.Max(0, realGap));
         if (w.Excl.Count > 0)
         {
             double m2 = margin * margin;
@@ -504,6 +529,7 @@ public static class SealantSolver
 
         double dV = dA * gap;
         w.Total.AddPoint(dA, dV, mid);
+        if (faying) w.Faying.AddPoint(dA, dV, mid);
         long key = Key(A, bestBody);
         Acc pa; if (!w.Pairs.TryGetValue(key, out pa)) { pa = new Acc(); w.Pairs[key] = pa; }
         pa.AddPoint(dA, dV, mid);
@@ -604,6 +630,13 @@ public static class Report
             r.Bodies, r.ActiveBodies, r.Triangles, r.CandidateTriangles));
         L.Add(string.Format("Sealant alanı       : {0} cm2", Fmt(r.Total.Area / 100.0, 2)));
         L.Add(string.Format("Sealant hacmi       : {0} cm3", Fmt(r.Total.Vol / 1000.0, 3)));
+        if (cfg.IncludeFaying)
+        {
+            double fv = r.Faying.Vol, gv = r.Total.Vol - fv, rho = cfg.DensityGcm3 * 1e-3;
+            L.Add(string.Format("  - boşluk dolgusu  : {0} cm3  {1} g", Fmt(gv / 1000.0, 3), Fmt(gv * rho, 1)));
+            L.Add(string.Format("  - temas (faying)  : {0} cm3  {1} g   alan {2} cm2, kalınlık {3} mm", Fmt(fv / 1000.0, 3),
+                Fmt(fv * rho, 1), Fmt(r.Faying.Area / 100.0, 2), Fmt(cfg.FayingThickness, 3)));
+        }
         L.Add(string.Format("Yoğunluk            : {0} g/cm3", Fmt(cfg.DensityGcm3, 3)));
         L.Add(string.Format("AĞIRLIK             : {0} kg  ({1} g)", Fmt(r.MassKg, 4), Fmt(r.MassKg * 1000, 1)));
         L.Add(string.Format("CG ({0})            : X={1}  Y={2}  Z={3}", unitName, Fmt(cg.X, 3), Fmt(cg.Y, 3), Fmt(cg.Z, 3)));

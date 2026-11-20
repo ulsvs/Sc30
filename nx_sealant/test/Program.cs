@@ -82,7 +82,15 @@ public static class Program
             AddBox(s, b, "A", BodyRole.Normal, 0, 0, 0, 100, 100, 2);
             AddBox(s, b, "C", BodyRole.Normal, 0, 0, -2, 100, 100, 0);   // temas
             AddBox(s, b, "D", BodyRole.Normal, 0, 0, 6, 100, 100, 8);    // 4 mm açıklık
-            Check("2 temas + büyük açıklık hacim", SealantSolver.Run(s, b, cfg).Total.Vol, 0, 0.001);
+            cfg.IncludeFaying = false;
+            Check("2 temas (faying kapalı) + büyük açıklık", SealantSolver.Run(s, b, cfg).Total.Vol, 0, 0.001);
+            cfg.IncludeFaying = true;
+            var rf = SealantSolver.Run(s, b, cfg);
+            Check("2b faying hacmi (100x100x0.1)", rf.Total.Vol, 1000, 0.01);
+            Check("2b faying ayrı raporlanan hacim", rf.Faying.Vol, 1000, 0.01);
+            Check("2b faying CG z (temas düzlemi)", rf.Total.Cg().Z, 0, 0.001);
+            double z0, z1;
+            Check("2b faying gösterim alanı", DispArea(rf, out z0, out z1), 10000, 0.001);
         }
         // 3) Menteşe (hariç) + 10 mm emniyet payı
         {

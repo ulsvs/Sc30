@@ -22,6 +22,7 @@ Bağlantı bölgeleri (menteşe, cıvata, burç vb. ve çevresindeki emniyet pay
 |---|---|---|
 | `MinGap` / `MaxGap` | 0.1 / 3.0 mm | Bu aralıktaki boşluklar doldurulur (altı temas, üstü açıklık) |
 | `MaxAngleDeg` | 25° | Yüzeylerin "karşılıklı" sayılması için açı toleransı |
+| `IncludeFaying` / `FayingThickness` | true / 0.10 mm | Birbirine değen yüzeylere bu kalınlıkta sealant say (raporda ayrı) |
 | `SampleSize` | 1.0 mm | Örnekleme aralığı (küçük = hassas/yavaş) |
 | `DensityGcm3` | 1.55 | Sealant yoğunluğu — TDS'den girin |
 | `ExcludeKeywords` | HINGE, MENTESE, BOLT, ... | Adında geçen bileşenler bağlantı elemanı sayılır |
@@ -31,6 +32,10 @@ Bağlantı bölgeleri (menteşe, cıvata, burç vb. ve çevresindeki emniyet pay
 | `ShowInNx` / `DisplayLayer` | true / 251 | Sealant bölgelerini montajda göster / layer'ı |
 | `MaxDisplayTriangles` | 3 000 000 | Üstündeyse NX'te çizilmez, sadece STL yazılır |
 | `WriteStl` | true | Sealant bölgelerini STL olarak kaydet |
+
+## Hızlı çalışma için
+`SampleSize` 2.0, `FacetChordTol` 0.05, `FacetSize` 15, `ExcludeMargin` 3,
+gerekmiyorsa `ShowInNx = false`. Ayrıntılar `Settings` sınıfının başındaki yorumda.
 
 ## Test (NX gerekmez)
 ```
