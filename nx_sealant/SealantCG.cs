@@ -52,6 +52,8 @@ public class Settings
         "HINGE", "MENTESE", "BOLT", "CIVATA", "SCREW", "VIDA", "NUT", "SOMUN",
         "WASHER", "PUL", "PIN", "BUSH", "BURC", "BEARING", "RULMAN", "RIVET", "PERCIN",
         "FASTENER", "LUG" };
+    // Adı bu metinlerden biriyle BAŞLAYAN bileşen/part/gövde hariç tutulur (ör. parça numarası ön eki)
+    public string[] ExcludePrefixes = new string[] { };
     public string ExcludeAttribute = "SEALANT_EXCLUDE"; // bu attribute'u olan bileşen/part hariç
     public double ExcludeMargin = 10.0;  // mm  hariç parçaların çevresindeki sealant'sız bölge
     public bool AskUserSelection = true; // çalışırken ek hariç parça/gövde seçtir
@@ -334,36 +336,41 @@ public static class SealantSolver
         foreach (BodyInfo B in bodies) if (B.Role == BodyRole.KeepOut && B.TriCount > 0) keepOuts.Add(B);
 
         // ---- 3) Dar faz: paralel örnekleme + ışın atma ------------------------------------
-        var po = new ParallelOptions();
-        po.MaxDegreeOfParallelism = cfg.MaxThreads > 0 ? cfg.MaxThreads : Environment.ProcessorCount;
-        object gate = new object();
+        int nThreads = Math.Max(1, cfg.MaxThreads > 0 ? cfg.MaxThreads : Environment.ProcessorCount);
         BodyRole[] role = new BodyRole[nb];
         for (int i = 0; i < nb; i++) role[i] = bodies[i].Role;
 
-        Parallel.For(0, candTris.Count, po,
-            () => new Worker(),
-            (ci, state, w) =>
+        // Her iş parçacığı kendi Worker'ına yazar (kilit yok); k. iş parçacığı k, k+T, k+2T ... üçgenlerini işler.
+        // Sadece Task kullanılır: NX journal derleyicisinin her sürümünde mevcut (Parallel sınıfı olmayabilir).
+        var workers = new Worker[nThreads];
+        var tasks = new Task[nThreads];
+        for (int k = 0; k < nThreads; k++)
+        {
+            int kk = k;
+            workers[kk] = new Worker();
+            tasks[kk] = Task.Factory.StartNew(delegate
             {
-                ProcessTriangle(candTris[ci], s, role, grid, exGrid, keepOuts, cfg, cosTol, margin, w);
-                return w;
-            },
-            w =>
+                Worker w = workers[kk];
+                for (int ci = kk; ci < candTris.Count; ci += nThreads)
+                    ProcessTriangle(candTris[ci], s, role, grid, exGrid, keepOuts, cfg, cosTol, margin, w);
+            }, TaskCreationOptions.LongRunning);
+        }
+        Task.WaitAll(tasks);
+
+        foreach (Worker w in workers)
+        {
+            res.Total.Merge(w.Total);
+            foreach (var kv in w.Pairs)
             {
-                lock (gate)
-                {
-                    res.Total.Merge(w.Total);
-                    foreach (var kv in w.Pairs)
-                    {
-                        Acc a; if (!res.Pairs.TryGetValue(kv.Key, out a)) { a = new Acc(); res.Pairs[kv.Key] = a; }
-                        a.Merge(kv.Value);
-                    }
-                    foreach (var kv in w.Disp)
-                    {
-                        List<float> d; if (!res.Display.TryGetValue(kv.Key, out d)) { d = new List<float>(); res.Display[kv.Key] = d; }
-                        d.AddRange(kv.Value);
-                    }
-                }
-            });
+                Acc a; if (!res.Pairs.TryGetValue(kv.Key, out a)) { a = new Acc(); res.Pairs[kv.Key] = a; }
+                a.Merge(kv.Value);
+            }
+            foreach (var kv in w.Disp)
+            {
+                List<float> d; if (!res.Display.TryGetValue(kv.Key, out d)) { d = new List<float>(); res.Display[kv.Key] = d; }
+                d.AddRange(kv.Value);
+            }
+        }
         return res;
     }
 
@@ -678,6 +685,13 @@ public static class Report
         foreach (string k in keywords) if (k.Length > 0 && t.Contains(Norm(k))) return true;
         return false;
     }
+
+    public static bool StartsWithAny(string text, string[] prefixes)
+    {
+        string t = Norm(text);
+        foreach (string k in prefixes) if (k.Length > 0 && t.StartsWith(Norm(k), StringComparison.Ordinal)) return true;
+        return false;
+    }
 }
 
 #if !SEALANT_TEST
@@ -835,7 +849,7 @@ public class SealantCG
     static void ShowRegions(Part work, SealantResult r, List<BodyInfo> bodies, Settings cfg, double workToMm)
     {
         theSession.SetUndoMark(Session.MarkVisibility.Visible, "Sealant gösterimi");
-        try { uf.Layer.SetStatus(cfg.DisplayLayer, UFConstants.UF_LAYER_SELECTABLE_LAYER); } catch { }
+        try { uf.Layer.SetStatus(cfg.DisplayLayer, UFConstants.UF_LAYER_ACTIVE_LAYER); } catch { }
         double inv = 1.0 / workToMm;
         double[,] v = new double[3, 3], nn = new double[3, 3];
         int[] adj = new int[] { UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID, UFConstants.UF_FACET_NULL_FACET_ID };
@@ -874,7 +888,7 @@ public class SealantCG
             }
             catch (Exception ex) { lw.WriteLine("  " + name + " oluşturulamadı: " + ex.Message); }
         }
-        try { uf.Disp.Regenerate(); } catch { }
+        try { uf.Disp.RegenerateDisplay(); } catch { }
     }
 
     /// Önceki çalıştırmanın work part'ta bıraktığı SEALANT_* facet nesnelerini ve CG noktasını siler.
@@ -914,6 +928,9 @@ public class SealantCG
         bool keep = Report.MatchesAny(c.DisplayName + " " + c.Name, new string[] { cfg.KeepOutName });
         bool excl = parentExcluded || exclComps.Contains(c.Tag)
                     || Report.MatchesAny(c.DisplayName + " " + c.Name + " " + partName, cfg.ExcludeKeywords)
+                    || Report.StartsWithAny(c.DisplayName, cfg.ExcludePrefixes)
+                    || Report.StartsWithAny(c.Name, cfg.ExcludePrefixes)
+                    || Report.StartsWithAny(partName, cfg.ExcludePrefixes)
                     || HasAttr(c, cfg.ExcludeAttribute) || (proto != null && HasAttr(proto, cfg.ExcludeAttribute));
         if (proto != null)
         {
@@ -934,7 +951,8 @@ public class SealantCG
     {
         if (Report.MatchesAny(bodyName, new string[] { cfg.KeepOutName })) return BodyRole.KeepOut;
         if (cfg.KeepOutLayer > 0 && c == null && b.Layer == cfg.KeepOutLayer) return BodyRole.KeepOut;
-        if (compExcluded || Report.MatchesAny(bodyName, cfg.ExcludeKeywords) || HasAttr(b, cfg.ExcludeAttribute)) return BodyRole.Excluded;
+        if (compExcluded || Report.MatchesAny(bodyName, cfg.ExcludeKeywords) || Report.StartsWithAny(bodyName, cfg.ExcludePrefixes)
+            || HasAttr(b, cfg.ExcludeAttribute)) return BodyRole.Excluded;
         return BodyRole.Normal;
     }
 
